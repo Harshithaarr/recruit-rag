@@ -1,0 +1,92 @@
+OMP_NUM_THREADS=1 uv run python scripts/diagnose_experience.py
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+======================================================================
+1. TRAJECTORY FEATURE DISTRIBUTION ON HF CORPUS
+======================================================================
+
+Corpus size: 477 résumés
+
+Seniority distribution:
+     UNKNOWN :   87  ( 18.2%)
+      JUNIOR :   47  (  9.9%)
+         MID :  288  ( 60.4%)
+      SENIOR :   30  (  6.3%)
+       STAFF :   17  (  3.6%)
+    DIRECTOR :    8  (  1.7%)
+
+Domain distribution:
+     backend :  223  ( 46.8%)
+        data :   88  ( 18.4%)
+    security :   58  ( 12.2%)
+      devops :   34  (  7.1%)
+    frontend :   32  (  6.7%)
+     general :   28  (  5.9%)
+      mobile :    9  (  1.9%)
+          ml :    5  (  1.0%)
+
+Company Tier-1 detected:
+       other :  458  ( 96.0%)
+      Tier-1 :   19  (  4.0%)
+
+YOE detection:  162/477 résumés (34.0%)
+  min  : 1.0
+  median: 8.0
+  max  : 35.0
+
+======================================================================
+2. WHO DOES EACH CHANNEL SURFACE — case study
+======================================================================
+
+JD: hfj-b1935c83eb
+   Detected criteria — min_yoe=12.0, seniority=SENIOR, domain=backend
+   First 200 chars: Primary Location: Melbourne, Florida
+V-Soft Consulting is currently hiring for an Application Software Engineering V for our premier client in Melbourne, Florida.
+Education And Experience 
+Years of Ex...
+Loading weights:   0%|          | 0/103 [00:00<?, ?it/s]Loading weights: 100%|██████████| 103/103 [00:00<00:00, 9032.64it/s]
+
+Dense top-5:
+  idx=406  yoe=15.0  sen=DIRECTOR  dom=backend   tier=0  label=POTENTIAL 
+      text: Professional SummaryMore than 15 years of experienced as Enterprise Solution Arc...
+  idx=450  yoe=None  sen=MID       dom=backend   tier=0  label=POTENTIAL 
+      text: Career OverviewHighly motivated Sales Associate with extensive customer service ...
+  idx=362  yoe=7.0  sen=MID       dom=backend   tier=1  label=unlabelled
+      text: Summary7 years of industry experience developing back-end of large-scale, enterp...
+  idx= 39  yoe=10.0  sen=JUNIOR    dom=backend   tier=0  label=unlabelled
+      text: Professional SummaryResults-oriented and innovative Senior Software Engineer wit...
+  idx=124  yoe=7.0  sen=MID       dom=backend   tier=0  label=unlabelled
+      text: SummarySkilled and technically qualified Java developer with 7+ years of IT indu...
+
+BM25 top-5:
+  idx=310  yoe=6.0  sen=MID       dom=backend   tier=0  label=NO_FIT    
+      text: SummarySenior Software Engineer with 6+ years in analysis, design, development, ...
+  idx=363  yoe=6.0  sen=MID       dom=backend   tier=0  label=unlabelled
+      text: SummaryPursue a challenging and rewarding position as a QA Analyst/ Software Qua...
+  idx=398  yoe=10.0  sen=MID       dom=backend   tier=0  label=POTENTIAL 
+      text: SummaryProficient use of Java (JSE /JEE) /C++ *More than 10 years' experience in...
+  idx=438  yoe=8.0  sen=MID       dom=backend   tier=0  label=unlabelled
+      text: Summary❖ IT Professional with over 8 years' experience of demonstrated success p...
+  idx=258  yoe=None  sen=DIRECTOR  dom=backend   tier=0  label=unlabelled
+      text: ProfileExperienced Corporate and Software Professional specializing in Data & An...
+
+Experience top-5:
+  idx= 77  yoe=10.0  sen=MID       dom=backend   tier=1  label=unlabelled
+      text: Professional ProfileHighly skilled professional with over 10 years' experience i...
+  idx=248  yoe=10.0  sen=MID       dom=backend   tier=1  label=unlabelled
+      text: SummaryDesktop and Server Support/ Application Server Technician Offer my Window...
+  idx= 87  yoe=19.0  sen=SENIOR    dom=backend   tier=0  label=POTENTIAL 
+      text: SummarySoftware Engineer offering 19 years in the IT industry with a focus on pr...
+  idx= 58  yoe=17.0  sen=SENIOR    dom=backend   tier=0  label=unlabelled
+      text: SummaryHighly motivated Senior Architect with 17 years experience in design and ...
+  idx=251  yoe=15.0  sen=SENIOR    dom=backend   tier=0  label=POTENTIAL 
+      text: ProfileFull stack senior software developer with 15 year experience in high tech...
+
+======================================================================
+3. DOES EXPERIENCE SURFACE TIER-1 / HIGH-YOE CANDIDATES?
+======================================================================
+
+Candidates with YOE ≥ 8 AND Tier-1 in text: 4
+  idx= 77  yoe=10.0  sen=MID       dom=backend     rank_exp=  1  rank_dense=217
+  idx=135  yoe=10.0  sen=MID       dom=data        rank_exp= 69  rank_dense= 23
+  idx=168  yoe= 8.0  sen=MID       dom=backend     rank_exp=  7  rank_dense=381
+  idx=248  yoe=10.0  sen=MID       dom=backend     rank_exp=  2  rank_dense=183

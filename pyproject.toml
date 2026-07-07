@@ -1,0 +1,50 @@
+[project]
+name = "recruit"
+version = "0.1.0"
+description = "AI-Based Recruitment Assistant: Semantic candidate matching, drop-off prediction, and RAG explanations"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "datasets>=4.8.5",
+    "fairlearn>=0.14.0",
+    "matplotlib>=3.11.0",
+    "optuna>=4.9.0",
+    "pandas>=2.2",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+matcher = [
+    "sentence-transformers>=2.7",
+    "faiss-cpu>=1.8",
+    "rank-bm25>=0.2.2",
+    "scikit-learn>=1.5",
+]
+dropoff = [
+    "xgboost>=2.0",
+    "shap>=0.45",
+    "scikit-learn>=1.5",
+]
+rag = [
+    "ollama>=0.2",
+]
+ui = [
+    "streamlit>=1.34",
+]
+dev = [
+    "ruff>=0.4",
+    "pytest>=8",
+    "ipykernel>=6.29",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/recruit"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"

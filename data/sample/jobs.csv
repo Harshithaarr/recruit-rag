@@ -1,0 +1,6 @@
+job_id,title,company,description,required_skills,min_years_experience,location,required_certifications
+J002,Machine Learning Engineer - NLP,SearchAI,"Train and deploy NLP models for query understanding and document ranking. Must have hands-on PyTorch and Hugging Face experience. Production deployment experience required.","Python,PyTorch,Hugging Face,NLP,MLOps",3.0,Bengaluru,
+J003,Frontend Engineer (React),ShopFlow,"Own the customer-facing dashboard. React + TypeScript, with Next.js for SSR. Strong on accessibility and component reuse.","React,TypeScript,Next.js,JavaScript,Accessibility",2.0,Hyderabad,
+J004,Kubernetes Platform Engineer,CloudCore,"Build the internal Kubernetes platform that hosts 100+ services. Terraform, AWS, GitOps. Mentor mid-level DevOps engineers.","Kubernetes,Terraform,AWS,GitOps,Docker",4.0,Pune,
+J005,Staff Search & Ranking Engineer,Marketplace,"Lead search-relevance work across query understanding, candidate generation, and learning-to-rank. Bring deep ML and large-scale serving experience.","Python,PyTorch,Spark,Ranking,Search,Distributed Systems",6.0,Bengaluru,
+J006,Junior Data Scientist,ConsultGroup,"Entry-level role. Pandas, scikit-learn, basic SQL. Work on classification and forecasting problems for client engagements.","Python,Pandas,scikit-learn,SQL,Statistics",0.0,Kochi,

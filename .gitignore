@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# uv / venv
+.venv/
+.python-version
+
+# Environment
+.env
+.env.local
+
+# Data
+data/raw/
+data/interim/
+data/processed/
+data/synthetic/
+!data/sample/
+!data/.gitkeep
+
+# Models & indexes (regenerable)
+models/
+indexes/
+*.faiss
+*.pkl
+*.joblib
+
+# Notebooks
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Office lock files (Word/PowerPoint temp files)
+~$*
+*.tmp
+
+# IDE
+.vscode/
+.idea/
+
+# Personal viva-prep material — not part of the dissertation deliverable
+docs/viva/
+scripts/build_midsem_deck.py

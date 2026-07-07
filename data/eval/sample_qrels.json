@@ -1,0 +1,23 @@
+{
+  "_comment": "Hand-labelled graded relevance for sample-data evaluation. Grades: 2 = highly relevant (strong fit), 1 = relevant (partial / stretch fit), 0 = not relevant (omitted). Constructed by inspection of sample/resumes.csv against sample/jobs.csv. Documented choices are in docs/concepts/03_evaluation.md (to be written).",
+  "J002": {
+    "R002": 2,
+    "R006": 2,
+    "R007": 1
+  },
+  "J003": {
+    "R003": 2,
+    "R005": 1
+  },
+  "J004": {
+    "R004": 2
+  },
+  "J005": {
+    "R006": 2,
+    "R002": 1
+  },
+  "J006": {
+    "R007": 2,
+    "R002": 1
+  }
+}
