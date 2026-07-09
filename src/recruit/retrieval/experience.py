@@ -67,6 +67,22 @@ class ResumeTrajectory:
     """Structured career-history features extracted from one résumé.
 
     Computed once per résumé at index-build time and cached.
+
+    RECENT-EXPERIENCE FIELDS
+    ------------------------
+    Added end-sem in direct response to reviewer feedback:
+      *"Focus predictive analysis on the last 3–4 years of experience."*
+
+    Aggregate fields (years_experience, seniority, company_tier, domain)
+    look across the entire résumé — a candidate who was at Google 10
+    years ago and a baker for the last 8 years still shows up as
+    SENIOR + Tier-1 + backend. That is wrong for job-matching: recent
+    experience is what predicts fit.
+
+    The four `recent_*` fields below re-run the same feature extractors
+    on ONLY the text spans that overlap the recent window (default:
+    roles ending within the last 4 years). The scorer then blends
+    aggregate + recent via a `recency_bias` weight.
     """
 
     years_experience: float | None
@@ -75,6 +91,13 @@ class ResumeTrajectory:
     domain: str  # one of DOMAIN_KEYWORDS keys, or "general"
     tenure_signal: float  # log-scaled, in [0, 1]
     role_count: int  # rough estimate from "at <company>" patterns
+
+    # ── Recent-window features (last 3–4 years) — end-sem addition ────
+    recent_yoe: float | None = None
+    recent_seniority: Seniority = Seniority.UNKNOWN
+    recent_company_tier: int = 0
+    recent_domain: str = "general"
+    n_recent_roles: int = 0  # how many date-range roles fell in the window
 
 
 @dataclass(frozen=True)
@@ -192,6 +215,12 @@ _DOMAIN_KEYWORDS: dict[str, frozenset[str]] = {
 # Each pattern is a regex; the WHOLE pattern must match (not a substring).
 _ROLE_NOUN = r"(?:engineer|developer|architect|scientist|analyst|programmer|manager|consultant|specialist|administrator|admin|lead|director|officer)"
 
+# Domain modifiers commonly interposed between a seniority word and the
+# role noun — e.g. "Senior SOFTWARE Engineer", "Staff BACKEND Engineer".
+# Allowing one optional modifier catches real-world titles without
+# broadening the pattern enough to false-positive on "senior citizen".
+_ROLE_MOD = r"(?:software|backend|front-?end|full[-\s]?stack|web|mobile|ios|android|data|ml|ai|cloud|devops|platform|systems|security|infrastructure|network|application)"
+
 _SENIORITY_PATTERNS: list[tuple[Seniority, list[re.Pattern[str]]]] = [
     (Seniority.DIRECTOR, [
         re.compile(rf"\b(?:director|vp|vice\s+president|head)\s+of\s+(?:engineering|technology|software|data|product|design)", re.IGNORECASE),
@@ -200,18 +229,18 @@ _SENIORITY_PATTERNS: list[tuple[Seniority, list[re.Pattern[str]]]] = [
         re.compile(r"\bcto\b|\bcio\b|\bcdo\b", re.IGNORECASE),
     ]),
     (Seniority.STAFF, [
-        re.compile(rf"\bstaff\s+{_ROLE_NOUN}", re.IGNORECASE),
-        re.compile(rf"\bprincipal\s+{_ROLE_NOUN}", re.IGNORECASE),
+        re.compile(rf"\bstaff\s+(?:{_ROLE_MOD}\s+)?{_ROLE_NOUN}", re.IGNORECASE),
+        re.compile(rf"\bprincipal\s+(?:{_ROLE_MOD}\s+)?{_ROLE_NOUN}", re.IGNORECASE),
         re.compile(rf"\b(?:tech|engineering|technical)\s+lead\b", re.IGNORECASE),
     ]),
     (Seniority.SENIOR, [
-        re.compile(rf"\bsenior\s+{_ROLE_NOUN}", re.IGNORECASE),
-        re.compile(rf"\bsr\.?\s+{_ROLE_NOUN}", re.IGNORECASE),
-        re.compile(rf"\blead\s+{_ROLE_NOUN}", re.IGNORECASE),
+        re.compile(rf"\bsenior\s+(?:{_ROLE_MOD}\s+)?{_ROLE_NOUN}", re.IGNORECASE),
+        re.compile(rf"\bsr\.?\s+(?:{_ROLE_MOD}\s+)?{_ROLE_NOUN}", re.IGNORECASE),
+        re.compile(rf"\blead\s+(?:{_ROLE_MOD}\s+)?{_ROLE_NOUN}", re.IGNORECASE),
     ]),
     (Seniority.JUNIOR, [
-        re.compile(rf"\b(?:junior|jr\.?)\s+{_ROLE_NOUN}", re.IGNORECASE),
-        re.compile(rf"\b(?:associate|graduate|entry[-\s]?level)\s+{_ROLE_NOUN}", re.IGNORECASE),
+        re.compile(rf"\b(?:junior|jr\.?)\s+(?:{_ROLE_MOD}\s+)?{_ROLE_NOUN}", re.IGNORECASE),
+        re.compile(rf"\b(?:associate|graduate|entry[-\s]?level)\s+(?:{_ROLE_MOD}\s+)?{_ROLE_NOUN}", re.IGNORECASE),
         re.compile(rf"\bintern\b(?:\s+at\b)?", re.IGNORECASE),
     ]),
 ]
@@ -361,12 +390,253 @@ def _role_count(text: str) -> int:
     return min(20, len(_ROLE_AT_PATTERN.findall(text)))
 
 
+# =====================================================================
+# Recent-window feature extraction — end-sem addition per reviewer ask
+# =====================================================================
+
+# Default recency window in years. Rationale for 4 years:
+# - Long enough to capture a full role rotation (typical tenure 2-3 years).
+# - Short enough that "recent" excludes early-career roles that no longer
+#   predict current fit for a technical hire.
+# - Aligns with the reviewer's specific phrasing ("last 3-4 years").
+_RECENT_WINDOW_YEARS: int = 4
+
+
+# Date-range regex patterns for finding role periods in résumé text.
+# Order matters: more-specific patterns match first so the generic
+# `\d{4}\s*-\s*\d{4}` doesn't consume matches the month-year variants
+# would have handled better.
+_MONTHS_RE = (
+    r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|"
+    r"january|february|march|april|june|july|august|september|"
+    r"october|november|december)"
+)
+_PRESENT_RE = r"(?:present|current|now|to\s+date|today|ongoing)"
+_DASH = r"\s*[-–—to]+\s*"
+
+_DATE_RANGE_PATTERNS: list[re.Pattern[str]] = [
+    # "Jan 2020 - Dec 2023"  /  "January 2020 - December 2023"
+    re.compile(
+        rf"{_MONTHS_RE}\.?\s+(\d{{4}}){_DASH}{_MONTHS_RE}\.?\s+(\d{{4}})",
+        re.IGNORECASE,
+    ),
+    # "Jan 2020 - Present"
+    re.compile(
+        rf"{_MONTHS_RE}\.?\s+(\d{{4}}){_DASH}{_PRESENT_RE}",
+        re.IGNORECASE,
+    ),
+    # "2020 - Present"  /  "2020-Present"
+    re.compile(
+        rf"\b(\d{{4}}){_DASH}{_PRESENT_RE}\b",
+        re.IGNORECASE,
+    ),
+    # "2020 - 2023"  /  "2020-2023"  /  "2020 – 2023"
+    re.compile(r"\b(\d{4})\s*[-–—]\s*(\d{4})\b"),
+    # "MM/YYYY - MM/YYYY"  /  "MM/YY - MM/YY"
+    re.compile(r"\b\d{1,2}/(\d{2,4})\s*[-–—]\s*\d{1,2}/(\d{2,4})\b"),
+]
+
+
+def _extract_role_periods(text: str) -> list[tuple[int, int, int, int]]:
+    """Extract `(start_year, end_year, span_start, span_end)` for every
+    date range in the résumé.
+
+    `span_start/span_end` are character offsets so callers can slice the
+    surrounding text to grab the role description. Overlapping matches
+    from different patterns are de-duplicated by their span.
+
+    Years that appear malformed (before 1970 or after the corpus year)
+    are filtered out — protects against zip codes and phone numbers that
+    could otherwise pattern-match.
+    """
+    seen_spans: set[tuple[int, int]] = set()
+    periods: list[tuple[int, int, int, int]] = []
+
+    for pattern in _DATE_RANGE_PATTERNS:
+        for m in pattern.finditer(text):
+            span = (m.start(), m.end())
+            if any(
+                # Discard if this span overlaps a previously-matched one.
+                not (span[1] <= s[0] or span[0] >= s[1]) for s in seen_spans
+            ):
+                continue
+            seen_spans.add(span)
+
+            groups = [g for g in m.groups() if g is not None]
+            try:
+                # First group is always the start year. The end year is either
+                # the second group or (for "Present" matches) the corpus year.
+                start_year = int(groups[0])
+                if len(groups) >= 2 and groups[1].isdigit():
+                    end_raw = int(groups[1])
+                    # Two-digit years: assume 20xx if <50, else 19xx.
+                    end_year = end_raw if end_raw >= 100 else (
+                        2000 + end_raw if end_raw < 50 else 1900 + end_raw
+                    )
+                else:
+                    end_year = _CORPUS_REFERENCE_YEAR
+            except (ValueError, IndexError):
+                continue
+
+            # Normalise two-digit start years too.
+            if start_year < 100:
+                start_year = (2000 + start_year) if start_year < 50 else (1900 + start_year)
+
+            # Sanity bounds — filter out zip codes / phone fragments.
+            if not (1970 <= start_year <= _CORPUS_REFERENCE_YEAR):
+                continue
+            if not (1970 <= end_year <= _CORPUS_REFERENCE_YEAR + 1):
+                continue
+            if start_year > end_year:
+                continue
+
+            periods.append((start_year, end_year, span[0], span[1]))
+
+    return periods
+
+
+def _is_recent(end_year: int, window: int = _RECENT_WINDOW_YEARS) -> bool:
+    """True if the role ended within the recent window (default 4 years)."""
+    return (_CORPUS_REFERENCE_YEAR - end_year) < window
+
+
+def _slice_recent_text(text: str, periods: list[tuple[int, int, int, int]],
+                      context_before: int = 120,
+                      context_after: int = 400) -> str:
+    """Concatenate the text spans around every recent date range.
+
+    Context window is asymmetric (more after than before) because role
+    descriptions typically follow the date range in résumé formatting:
+
+        Software Engineer at Google
+        Jan 2022 - Present
+        [role description follows here for several paragraphs]
+
+    Adjacent-role safety: the window for one period never crosses into
+    another period's date range. Without this, tightly-packed résumés
+    (where roles are separated by only a few lines) would leak the
+    text of an OLDER role into the RECENT text window and pollute the
+    seniority / domain / company-tier detectors.
+    """
+    if not periods:
+        return ""
+
+    # Sort periods left-to-right by span_start so we can bound windows
+    # against the neighbouring role's span.
+    ordered = sorted(periods, key=lambda p: p[2])
+
+    # Paragraph-boundary positions (indices of double newlines) — used to
+    # stop the context window from crossing into another role's block.
+    # Prevents leakage like "Google" from an OLDER role being counted in
+    # the RECENT window when the older role's title appears before its
+    # own date range.
+    para_boundaries = [m.start() for m in re.finditer(r"\n\s*\n", text)]
+
+    def _nearest_para_boundary_before(pos: int, upper_bound: int) -> int:
+        """Latest paragraph boundary strictly before `pos`, but at or above
+        `upper_bound` (so we don't retreat past the current role's start).
+
+        Fallback when no boundary is found in the range: use `upper_bound`
+        itself (the raw window edge). Falling back to `pos` would collapse
+        the window to zero size and lose the role's title.
+        """
+        candidates = [b for b in para_boundaries if upper_bound <= b < pos]
+        return max(candidates) if candidates else upper_bound
+
+    def _nearest_para_boundary_after(pos: int, lower_bound: int) -> int:
+        """Earliest paragraph boundary strictly after `pos`, but at or below
+        `lower_bound`. Fallback: `lower_bound` (the raw window edge)."""
+        candidates = [b for b in para_boundaries if pos < b <= lower_bound]
+        return min(candidates) if candidates else lower_bound
+
+    recent_slices: list[str] = []
+    for i, (start_yr, end_yr, s0, s1) in enumerate(ordered):
+        if not _is_recent(end_yr):
+            continue
+
+        # Left bound — the earliest character we're willing to include:
+        #   1. no earlier than the previous role's span_end
+        #   2. no earlier than s0 - context_before
+        #   3. snapped forward to the closest paragraph boundary if one
+        #      lies between the two — so the previous role's description
+        #      never leaks into this window
+        prev_span_end = ordered[i - 1][3] if i > 0 else 0
+        raw_left = max(prev_span_end, s0 - context_before)
+        chunk_start = _nearest_para_boundary_before(s0, raw_left)
+
+        # Right bound — mirror logic.
+        next_span_start = ordered[i + 1][2] if i + 1 < len(ordered) else len(text)
+        raw_right = min(next_span_start, s1 + context_after)
+        chunk_end = _nearest_para_boundary_after(s1, raw_right)
+
+        recent_slices.append(text[chunk_start:chunk_end])
+
+    return "\n\n".join(recent_slices)
+
+
+def _recent_yoe(periods: list[tuple[int, int, int, int]],
+                window: int = _RECENT_WINDOW_YEARS) -> float:
+    """Sum of role durations that fell within the recent window.
+
+    Roles that span the window boundary are clipped to the recent portion
+    only — a role from 2019 to 2024 with a 4-year window contributes only
+    the years from 2022 onward.
+    """
+    if not periods:
+        return 0.0
+    cutoff = _CORPUS_REFERENCE_YEAR - window
+    total = 0.0
+    for start_yr, end_yr, _, _ in periods:
+        if end_yr <= cutoff:
+            continue
+        effective_start = max(start_yr, cutoff)
+        total += max(0, end_yr - effective_start)
+    return float(total)
+
+
+def _extract_recent_features(text: str) -> tuple[
+    float | None, Seniority, str, int, int
+]:
+    """Return `(recent_yoe, recent_seniority, recent_domain, recent_tier, n_recent_roles)`.
+
+    Falls back gracefully when no date ranges are detected:
+      · Returns (None, UNKNOWN, "general", 0, 0)
+      · The aggregate features remain — the scorer will not have a recent
+        signal to blend, but ranking still works.
+    """
+    periods = _extract_role_periods(text)
+    if not periods:
+        return None, Seniority.UNKNOWN, "general", 0, 0
+
+    recent_periods = [p for p in periods if _is_recent(p[1])]
+    if not recent_periods:
+        return 0.0, Seniority.UNKNOWN, "general", 0, 0
+
+    recent_text = _slice_recent_text(text, periods)
+    if not recent_text.strip():
+        return _recent_yoe(periods), Seniority.UNKNOWN, "general", 0, len(recent_periods)
+
+    return (
+        _recent_yoe(periods),
+        _detect_seniority(recent_text),
+        _detect_domain(recent_text),
+        _detect_company_tier(recent_text),
+        len(recent_periods),
+    )
+
+
 def extract_resume_trajectory(resume: Resume) -> ResumeTrajectory:
     """Extract the structured trajectory features from one résumé.
 
     Prefers schema-declared fields (resume.years_experience) over text-derived
     ones — when both are available, the declared value wins.
+
+    Computes BOTH the aggregate-résumé features (seniority, domain, tier
+    across the whole text) AND the recent-window features (same detectors
+    but on text spans overlapping the last 3–4 years). The trajectory
+    scorer blends the two via a `recency_bias` weight.
     """
+    # ── Aggregate (whole-résumé) features ─────────────────────────────
     yoe = resume.years_experience
     if yoe is None:
         yoe = _detect_yoe(resume.text)
@@ -384,6 +654,15 @@ def extract_resume_trajectory(resume: Resume) -> ResumeTrajectory:
     tenure = _tenure_signal(yoe)
     roles = _role_count(resume.text)
 
+    # ── Recent-window features (end-sem addition) ─────────────────────
+    (
+        recent_yoe_val,
+        recent_seniority,
+        recent_domain,
+        recent_tier,
+        n_recent,
+    ) = _extract_recent_features(resume.text)
+
     return ResumeTrajectory(
         years_experience=yoe,
         seniority=seniority,
@@ -391,6 +670,11 @@ def extract_resume_trajectory(resume: Resume) -> ResumeTrajectory:
         domain=domain,
         tenure_signal=tenure,
         role_count=roles,
+        recent_yoe=recent_yoe_val,
+        recent_seniority=recent_seniority,
+        recent_company_tier=recent_tier,
+        recent_domain=recent_domain,
+        n_recent_roles=n_recent,
     )
 
 
@@ -429,8 +713,25 @@ class ScoringWeights:
     - Domain overlap is a strong but not overwhelming match signal.
     - Company-tier is a small bonus (capped), not a primary factor.
 
-    These are starting weights. The evaluation harness will sensitivity-test
-    them — that sensitivity analysis is its own thesis figure.
+    RECENCY BIAS
+    ------------
+    Added end-sem in direct response to reviewer feedback (mid-sem viva):
+      *"Focus predictive analysis on the last 3–4 years of experience."*
+
+    `recency_bias` blends the aggregate trajectory features (whole-résumé
+    seniority / domain / company-tier) with the recent-window features
+    (same detectors run only on text near date ranges ending within the
+    last ~4 years).
+
+      · 0.0 → aggregate features only (legacy behaviour)
+      · 0.5 → equal blend
+      · 0.6 → recent leans over aggregate  ← DEFAULT
+      · 1.0 → recent features only
+
+    Rationale for 0.6 default: a meaningful preference for recent
+    experience without discarding career depth entirely. A senior engineer
+    who worked at Google 8 years ago still has demonstrable technical
+    background; the point is to prefer someone doing similar work today.
     """
 
     yoe_match: float = 0.30
@@ -438,6 +739,9 @@ class ScoringWeights:
     domain_overlap: float = 0.25
     tenure: float = 0.10
     tier_bonus: float = 0.15  # capped contribution — see notes in `trajectory_score`
+
+    # End-sem addition: how much to weight recent-window vs aggregate signals.
+    recency_bias: float = 0.60
 
 
 def _yoe_match_score(candidate_yoe: float | None, min_yoe: float | None) -> float:
@@ -498,14 +802,53 @@ def trajectory_score(
 
     `use_company_tier` toggles the tier bonus. The fairness audit reports
     metrics both with and without it to isolate its effect.
+
+    RECENCY BLEND (end-sem addition — reviewer feedback)
+    ----------------------------------------------------
+    Each per-component score is computed twice:
+      · once against the aggregate résumé features (legacy behaviour)
+      · once against the recent-window features (last 3–4 years)
+    The two are blended by `weights.recency_bias`:
+        component = (1 - β) · aggregate + β · recent
+    When the résumé has no detectable date ranges, `recent_*` falls back
+    to UNKNOWN / "general" — the score treats these as neutral (0.5) so
+    a résumé without extractable dates isn't penalised.
     """
     w = weights or ScoringWeights()
 
-    yoe = _yoe_match_score(trajectory.years_experience, criteria.min_yoe)
-    sen = _seniority_match_score(trajectory.seniority, criteria.target_seniority)
-    dom = _domain_overlap_score(trajectory.domain, criteria.target_domain)
+    # Recency blend only applies when we successfully extracted at least
+    # one recent role from the résumé. Otherwise (typically ~90% of the
+    # Kaggle-sourced résumés which have been date-scrubbed), the blend
+    # would penalise perfectly good candidates for a *data* limitation.
+    # Detection: `recent_yoe is None` OR `n_recent_roles == 0` → skip blend.
+    has_recent_signal = (
+        trajectory.recent_yoe is not None
+        and trajectory.n_recent_roles > 0
+    )
+    beta = max(0.0, min(1.0, w.recency_bias)) if has_recent_signal else 0.0
+
+    # ── YOE component ────────────────────────────────────────────────
+    yoe_agg = _yoe_match_score(trajectory.years_experience, criteria.min_yoe)
+    yoe_rec = _yoe_match_score(trajectory.recent_yoe, criteria.min_yoe)
+    yoe = (1 - beta) * yoe_agg + beta * yoe_rec
+
+    # ── Seniority component ──────────────────────────────────────────
+    sen_agg = _seniority_match_score(trajectory.seniority, criteria.target_seniority)
+    sen_rec = _seniority_match_score(trajectory.recent_seniority, criteria.target_seniority)
+    sen = (1 - beta) * sen_agg + beta * sen_rec
+
+    # ── Domain component ─────────────────────────────────────────────
+    dom_agg = _domain_overlap_score(trajectory.domain, criteria.target_domain)
+    dom_rec = _domain_overlap_score(trajectory.recent_domain, criteria.target_domain)
+    dom = (1 - beta) * dom_agg + beta * dom_rec
+
+    # ── Tenure (aggregate only — depth is depth) ─────────────────────
     ten = trajectory.tenure_signal
-    tier = (trajectory.company_tier * 1.0) if use_company_tier else 0.0
+
+    # ── Company tier (blended, if enabled) ───────────────────────────
+    tier_agg = float(trajectory.company_tier) if use_company_tier else 0.0
+    tier_rec = float(trajectory.recent_company_tier) if use_company_tier else 0.0
+    tier = (1 - beta) * tier_agg + beta * tier_rec
 
     total = (
         w.yoe_match * yoe

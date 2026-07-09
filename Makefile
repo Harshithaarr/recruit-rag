@@ -35,6 +35,8 @@ help:
 	@echo "  make train                   Train logistic + XGBoost (VARIANT=$(VARIANT))"
 	@echo "  make tune                    Optuna search + isotonic calibration (VARIANT=$(VARIANT))"
 	@echo "  make generate-postoffer-data Post-offer decline PoC dataset (end-sem extension)"
+	@echo "  make train-postoffer         Train post-offer XGBoost with Optuna tuning"
+	@echo "  make train-postoffer-fast    Post-offer training, no tuning (fast dev iteration)"
 	@echo ""
 	@echo "Evaluation:"
 	@echo "  make eval-retrieval  IR ablation on HF labelled benchmark"
@@ -101,6 +103,17 @@ $(PROCESSED)/postoffer_v1.parquet:
 
 .PHONY: generate-postoffer-data
 generate-postoffer-data: $(PROCESSED)/postoffer_v1.parquet
+
+$(MODELS)/postoffer_v1.joblib: $(PROCESSED)/postoffer_v1.parquet
+	$(PY) scripts/train_postoffer.py
+
+.PHONY: train-postoffer
+train-postoffer: $(MODELS)/postoffer_v1.joblib
+
+# Fast dev variant — no Optuna tune, uses defaults. Useful for iteration.
+.PHONY: train-postoffer-fast
+train-postoffer-fast: $(PROCESSED)/postoffer_v1.parquet
+	$(PY) scripts/train_postoffer.py --no-tune
 
 $(MODELS)/dropoff_$(VARIANT).joblib: $(PROCESSED)/dropoff_$(VARIANT).parquet
 	$(PY) scripts/train_dropoff.py --variant $(VARIANT)

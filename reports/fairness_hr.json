@@ -1,0 +1,36 @@
+{
+  "attribute": "gender",
+  "threshold": 0.5,
+  "n_audited": 2898,
+  "n_skipped": 934,
+  "demographic_parity_diff": 0.04117259552042157,
+  "equal_opportunity_diff": 0.15435540069686415,
+  "disparate_impact_ratio": 0.8803827751196173,
+  "passes_4_5_rule": true,
+  "groups": [
+    {
+      "group": "Female",
+      "n": 276,
+      "base_rate": 0.2753623188405797,
+      "selection_rate": 0.3442028985507246,
+      "tpr": 0.75,
+      "fpr": 0.19
+    },
+    {
+      "group": "Male",
+      "n": 2589,
+      "base_rate": 0.22170722286597142,
+      "selection_rate": 0.3174971031286211,
+      "tpr": 0.7543554006968641,
+      "fpr": 0.19305210918114143
+    },
+    {
+      "group": "Other",
+      "n": 33,
+      "base_rate": 0.30303030303030304,
+      "selection_rate": 0.30303030303030304,
+      "tpr": 0.6,
+      "fpr": 0.17391304347826086
+    }
+  ]
+}

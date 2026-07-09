@@ -153,6 +153,104 @@ def main() -> None:
             f"  rank_exp={rank_in_exp:>3d}  rank_dense={rank_in_dense:>3d}"
         )
 
+    # ------------------------------------------------------------------
+    print("\n" + "=" * 70)
+    print("4. RECENCY-WEIGHTED SCORING — end-sem extension per reviewer ask")
+    print("=" * 70)
+    print(
+        "\nMid-sem viva feedback: 'focus predictive analysis on the last 3-4 "
+        "years of experience.' The trajectory scorer now extracts a "
+        "recent-window feature set (default 4-year window) and blends it "
+        "with the aggregate signal via `ScoringWeights.recency_bias` "
+        "(default 0.60 = 60% recent weight)."
+    )
+
+    # ---- 4a. Corpus-wide extractor coverage ----
+    print("\n--- 4a. Date-range extraction coverage on the corpus ---")
+    n = len(trajs)
+    with_recent = sum(1 for t in trajs if t.n_recent_roles > 0)
+    with_any_dates = sum(
+        1 for r in resumes
+        if _has_any_date_ranges(r.text)
+    )
+    disagree = sum(
+        1 for t in trajs
+        if t.recent_seniority.value != Seniority.UNKNOWN.value
+        and t.recent_seniority != t.seniority
+    )
+    print(f"  Résumés analysed: {n}")
+    print(f"  With ANY parseable date ranges:  {with_any_dates:>4d}  ({100*with_any_dates/n:5.1f}%)")
+    print(f"  With ≥1 recent role (last 4 yrs): {with_recent:>4d}  ({100*with_recent/n:5.1f}%)")
+    print(f"  Where recent seniority differs from aggregate: {disagree}")
+    print(
+        f"\n  Note: the Kaggle corpus is date-scrubbed, which limits recency\n"
+        f"  coverage. Production ATS data would have dates universally."
+    )
+
+    # ---- 4b. Side-by-side ranking under three recency biases ----
+    print(f"\n--- 4b. Top-5 for JD {target_jd.job_id} — aggregate vs blended vs recent-only ---")
+    print(f"    (JD criteria: min_yoe={crit.min_yoe}  seniority={crit.target_seniority.name}  "
+          f"domain={crit.target_domain})")
+
+    from recruit.retrieval.experience import ScoringWeights, trajectory_score
+
+    def top5_under(bias: float) -> list[tuple[int, float]]:
+        scored = [
+            (i, trajectory_score(t, crit, weights=ScoringWeights(recency_bias=bias)).total)
+            for i, t in enumerate(trajs)
+        ]
+        scored.sort(key=lambda kv: -kv[1])
+        return scored[:5]
+
+    by_bias = {b: top5_under(b) for b in (0.0, 0.6, 1.0)}
+
+    print(f"\n  {'Rank':<5}{'β=0.0 (aggregate)':<28}"
+          f"{'β=0.6 (blended · default)':<32}{'β=1.0 (recent only)':<26}")
+    print("  " + "-" * 90)
+    for r in range(5):
+        row = f"  {r+1:<5}"
+        for b in (0.0, 0.6, 1.0):
+            idx_r, sc = by_bias[b][r]
+            t = trajs[idx_r]
+            marker = "*" if t.n_recent_roles > 0 else " "
+            row += f"idx={idx_r:>3d}{marker} sc={sc:.3f}  "
+        print(row)
+    print("\n  *  = résumé has a detected recent role (blend applies)")
+    print("  no * = résumé has no parseable dates (blend falls back to aggregate)")
+
+    # ---- 4c. Concrete before/after — same résumé, different scoring ----
+    print("\n--- 4c. Résumés where recency changes the seniority reading ---")
+    disagreeing = [
+        (i, t) for i, t in enumerate(trajs)
+        if t.n_recent_roles > 0
+        and t.recent_seniority != Seniority.UNKNOWN
+        and t.recent_seniority != t.seniority
+    ]
+    if disagreeing:
+        print(f"  Found {len(disagreeing)} résumés where recent seniority ≠ aggregate:")
+        for i, t in disagreeing[:8]:
+            print(
+                f"  idx={i:>3d}  aggregate_sen={t.seniority.name:<8s}  "
+                f"recent_sen={t.recent_seniority.name:<8s}  "
+                f"recent_yoe={t.recent_yoe}  n_recent={t.n_recent_roles}"
+            )
+    else:
+        print("  (none — date coverage on this corpus is too sparse)")
+
+    print(
+        "\n  Interpretation: on corpora with proper date coverage (production ATS "
+        "data),\n  this comparison would be dominated by real signal — someone who was\n"
+        "  senior at Google 10 years ago but a mid-level developer for the last 4\n"
+        "  years would show as SENIOR aggregate, MID recent. The recency-weighted\n"
+        "  score correctly matches them to mid-level roles today.\n"
+    )
+
+
+def _has_any_date_ranges(text: str) -> bool:
+    """Quick helper — does this résumé contain ANY parseable date range?"""
+    from recruit.retrieval.experience import _extract_role_periods
+    return bool(_extract_role_periods(text))
+
 
 if __name__ == "__main__":
     main()

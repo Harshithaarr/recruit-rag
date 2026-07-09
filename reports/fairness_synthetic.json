@@ -1,0 +1,56 @@
+{
+  "variant": "v1",
+  "model_used": "dropoff_v1_calibrated.joblib",
+  "gender_proxy": {
+    "attribute": "gender",
+    "threshold": 0.5,
+    "demographic_parity_diff": 0.0,
+    "equal_opportunity_diff": 0.0,
+    "disparate_impact_ratio": 1.0,
+    "passes_4_5_rule": true,
+    "groups": [
+      {
+        "group": "unknown",
+        "n": 1485,
+        "base_rate": 0.2505050505050505,
+        "selection_rate": 0.15218855218855218,
+        "tpr": 0.42473118279569894,
+        "fpr": 0.061096136567834684
+      }
+    ]
+  },
+  "country_proxy": {
+    "attribute": "country",
+    "threshold": 0.5,
+    "demographic_parity_diff": 0.07685589519650654,
+    "equal_opportunity_diff": 0.2356060606060606,
+    "disparate_impact_ratio": 0.5654320987654321,
+    "passes_4_5_rule": false,
+    "groups": [
+      {
+        "group": "IN",
+        "n": 110,
+        "base_rate": 0.3,
+        "selection_rate": 0.1,
+        "tpr": 0.2727272727272727,
+        "fpr": 0.025974025974025976
+      },
+      {
+        "group": "US",
+        "n": 458,
+        "base_rate": 0.26200873362445415,
+        "selection_rate": 0.17685589519650655,
+        "tpr": 0.5083333333333333,
+        "fpr": 0.05917159763313609
+      },
+      {
+        "group": "other",
+        "n": 910,
+        "base_rate": 0.23736263736263735,
+        "selection_rate": 0.14395604395604394,
+        "tpr": 0.39351851851851855,
+        "fpr": 0.06628242074927954
+      }
+    ]
+  }
+}

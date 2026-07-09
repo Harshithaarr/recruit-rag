@@ -288,11 +288,35 @@ def load_pipeline(model_filename: str) -> dict:
     """Compose corpus + indexes + chosen predictor."""
     base = load_corpus_and_indexes()
     predictor = load_predictor(model_filename)
+    postoffer_predictor = _try_load_postoffer_predictor()
     return {
         **base,
         "predictor": predictor,
+        "postoffer_predictor": postoffer_predictor,
         "active_model_path": settings.models_path / model_filename,
     }
+
+
+@st.cache_resource(show_spinner="Loading post-offer PoC model…")
+def _try_load_postoffer_predictor():
+    """Load the post-offer predictor if the model artefact exists.
+
+    The post-offer PoC is an end-sem extension responding to reviewer
+    feedback that post-offer drop-off has higher business value than mid-
+    application. Returns None gracefully if the model hasn't been trained
+    yet (`make train-postoffer` produces the artefact).
+    """
+    path = settings.models_path / "postoffer_v1_calibrated.joblib"
+    if not path.exists():
+        return None
+    try:
+        from recruit.postoffer.predict import PostOfferPredictor
+        return PostOfferPredictor(path)
+    except Exception as e:  # noqa: BLE001
+        # Non-fatal — post-offer step will surface a helpful error and
+        # the main workflow keeps working.
+        print(f"Post-offer predictor unavailable: {e}")
+        return None
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -592,69 +616,137 @@ def render_live_watch_panel(
 
     form_col, signal_col = st.columns([3, 2], gap="large")
 
-    # ── Left column: résumé-submission simulator ──────────────────────
+    # ── Left column: application form — the drop-off observation surface ─
     with form_col:
         st.markdown(
             "<div style='font-weight:600;margin-bottom:4px;'>"
-            "Résumé-submission simulator</div>",
+            "📋 Application form — watch drop-off signals as the candidate fills it</div>",
             unsafe_allow_html=True,
         )
         st.caption(
-            "Modern candidates upload a résumé — they do not fill long "
-            "forms. In production these signals arrive from the ATS "
-            "(Jobvite, Greenhouse, Workday) as the candidate progresses "
-            "through the submission funnel. Click a scenario to simulate "
-            "what the ATS would emit."
+            "The recruiter watches the model update in real time as the candidate "
+            "fills the application. Each field completion, skip, or navigation "
+            "back is a telemetry event feeding the drop-off predictor. "
+            "This is how a hiring team identifies **which fields drive drop-off** "
+            "and iterates the application design to make it simpler."
         )
 
-        # Scenario buttons — set the same underlying session state that
-        # the model consumes, but framed as a résumé-submission funnel
-        # instead of form-field-level telemetry.
-        sc_a, sc_b, sc_c, sc_d = st.columns(4)
-        with sc_a:
-            if st.button("🟢 Fast submitter", use_container_width=True,
-                         help="Uploaded résumé within 30s, reviewed once, submitted. Desktop."):
-                _apply_submission_scenario("fast", watched_row["resume_idx"])
-                st.rerun()
-        with sc_b:
-            if st.button("🟡 Hesitant", use_container_width=True,
-                         help="90s to upload, re-uploaded once, reviewed twice. Mobile."):
-                _apply_submission_scenario("hesitant", watched_row["resume_idx"])
-                st.rerun()
-        with sc_c:
-            if st.button("🔴 Abandoning", use_container_width=True,
-                         help="Opened uploader, lingered 2 minutes, navigated back to JD twice, never submitted."):
-                _apply_submission_scenario("abandoning", watched_row["resume_idx"])
-                st.rerun()
-        with sc_d:
-            if st.button("Reset", use_container_width=True,
-                         help="Clear the simulator and start fresh."):
+        # Quick-simulate shortcut — collapsed. Useful when a demo audience
+        # wants to see the model's reaction to a candidate archetype without
+        # typing field-by-field. The primary interaction is the form below.
+        with st.expander("⚡ Quick simulate a candidate archetype", expanded=False):
+            st.caption(
+                "Pre-populates the form fields to simulate a typical candidate "
+                "behaviour pattern. Useful for demos where you want to jump "
+                "between archetypes quickly rather than filling the form."
+            )
+            sc_a, sc_b, sc_c, sc_d = st.columns(4)
+            with sc_a:
+                if st.button("🟢 Engaged", use_container_width=True,
+                             key="quick_sim_fast",
+                             help="Filled most fields, no back-navigation, quick submit."):
+                    _apply_submission_scenario("fast", watched_row["resume_idx"])
+                    st.rerun()
+            with sc_b:
+                if st.button("🟡 Hesitant", use_container_width=True,
+                             key="quick_sim_hesitant",
+                             help="Some skips, moderate time, one back-navigation."):
+                    _apply_submission_scenario("hesitant", watched_row["resume_idx"])
+                    st.rerun()
+            with sc_c:
+                if st.button("🔴 Abandoning", use_container_width=True,
+                             key="quick_sim_abandoning",
+                             help="Many skips, multiple back-clicks, likely to leave."):
+                    _apply_submission_scenario("abandoning", watched_row["resume_idx"])
+                    st.rerun()
+            with sc_d:
+                if st.button("Reset", use_container_width=True,
+                             key="quick_sim_reset",
+                             help="Clear the form."):
+                    reset_watch_state(new_resume_idx=watched_row["resume_idx"])
+                    st.rerun()
+
+        # Compact control row: candidate action + UI actions grouped.
+        ctl_a, ctl_b, ctl_c = st.columns([2, 1, 1])
+        with ctl_a:
+            st.checkbox(
+                "Mobile device",
+                key="watch_is_mobile",
+                help="Toggle the mobile session feature — mobile applications have higher drop-off rates.",
+            )
+        with ctl_b:
+            if st.button("◀ Back nav", key="watch_prev_btn",
+                         use_container_width=True,
+                         help="Counts as a candidate navigation-back event."):
+                st.session_state.watch_back_count += 1
+                st.toast("Back-navigation recorded.")
+        with ctl_c:
+            if st.button("Reset", key="watch_reset_btn",
+                         use_container_width=True,
+                         help="Clear all form state and start fresh."):
                 reset_watch_state(new_resume_idx=watched_row["resume_idx"])
                 st.rerun()
 
-        # Current state summary — one compact block, no per-field noise.
-        current_scenario = st.session_state.get("current_scenario_label", None)
-        sess_now = aggregate_watch_session()
-        if current_scenario:
+        # ── The application form — field-by-field ─────────────────────
+        for f in FORM_FIELDS:
+            key = f["key"]
+            status = st.session_state[f"watch_field_{key}_status"]
+            badge_color, badge_text = _LIVE_STATUS_BADGE[status]
+
+            # Field label + status badge on one row; input + action buttons
+            # on the next.
             st.markdown(
-                f"<div style='background:#f1f5f9;border-radius:6px;"
-                f"padding:10px 14px;margin-top:10px;font-size:13px;"
-                f"line-height:1.6;border-left:3px solid #1e3a5f;'>"
-                f"<b>Scenario loaded:</b> {current_scenario}<br/>"
-                f"<span style='color:#64748b;'>"
-                f"Steps completed: {sess_now['session_n_fields_completed']} · "
-                f"skipped: {sess_now['session_n_fields_skipped']} · "
-                f"time on session: {sess_now['session_time_on_page_secs']}s · "
-                f"back-navigation: {st.session_state.get('watch_back_count', 0)}"
-                f"</span></div>",
+                f"<div class='watch-field-label'>"
+                f"<b>{f['label']}</b>"
+                f"<span style='background:{badge_color};color:white;"
+                f"padding:2px 8px;border-radius:10px;font-size:10px;"
+                f"font-weight:600;'>{badge_text}</span></div>",
                 unsafe_allow_html=True,
             )
-        else:
-            st.info(
-                "No scenario loaded yet. Click a scenario above to simulate "
-                "the ATS telemetry that would arrive during a candidate's "
-                "résumé submission session."
-            )
+
+            input_col, skip_col, clear_col = st.columns([6, 1, 1])
+            with input_col:
+                if f["long"]:
+                    value = st.text_area(
+                        f["label"],
+                        value=st.session_state[f"watch_field_{key}_value"],
+                        key=f"watch_input_{key}",
+                        height=68,
+                        label_visibility="collapsed",
+                        disabled=(status == "skipped"),
+                    )
+                else:
+                    value = st.text_input(
+                        f["label"],
+                        value=st.session_state[f"watch_field_{key}_value"],
+                        key=f"watch_input_{key}",
+                        label_visibility="collapsed",
+                        disabled=(status == "skipped"),
+                    )
+
+                if value and st.session_state.watch_started_ts is None:
+                    st.session_state.watch_started_ts = time.time()
+                if value and status != "skipped":
+                    st.session_state[f"watch_field_{key}_value"] = value
+                    st.session_state[f"watch_field_{key}_status"] = "filled"
+
+            with skip_col:
+                if st.button("Skip",
+                             key=f"watch_skip_{key}",
+                             use_container_width=True,
+                             disabled=(status == "filled")):
+                    st.session_state[f"watch_field_{key}_status"] = "skipped"
+                    st.session_state[f"watch_field_{key}_value"] = ""
+                    if st.session_state.watch_started_ts is None:
+                        st.session_state.watch_started_ts = time.time()
+                    st.rerun()
+            with clear_col:
+                if st.button("Clear",
+                             key=f"watch_clear_{key}",
+                             use_container_width=True):
+                    st.session_state[f"watch_field_{key}_status"] = "pending"
+                    st.session_state[f"watch_field_{key}_value"] = ""
+                    st.rerun()
 
 
     # ── Right column: live drop-off signal + telemetry + SHAP ──────────
@@ -766,11 +858,12 @@ def render_live_watch_panel(
 # ─────────────────────────────────────────────────────────────────────────
 
 
-_STEPS = ["search", "shortlist", "watch"]
+_STEPS = ["search", "shortlist", "watch", "postoffer"]
 _STEP_LABELS = {
     "search":    "1 · Search JD",
     "shortlist": "2 · Shortlist",
     "watch":     "3 · Live watch",
+    "postoffer": "4 · Post-offer",
 }
 
 
@@ -793,9 +886,11 @@ def render_step_navigator() -> None:
     has_search = "search_rows" in st.session_state
     has_watch = st.session_state.get("watching_resume_idx") is not None
 
-    cols = st.columns(3, gap="small")
+    cols = st.columns(len(_STEPS), gap="small")
     for i, step in enumerate(_STEPS):
         active = (step == cur)
+        # Post-offer is independent — the recruiter can jump there directly
+        # to explore the extension without needing a prior candidate context.
         disabled = (
             (step == "shortlist" and not has_search)
             or (step == "watch" and not has_watch)
@@ -1128,6 +1223,85 @@ def render_shortlist_step() -> None:
 # ─────────────────────────────────────────────────────────────────────────
 
 
+def _render_candidate_resume(resume: Resume, watched_row: dict) -> None:
+    """Compact résumé card — shown at the top of the Live-watch step.
+
+    Groups the extracted facts (skills, YOE, location) on the left and the
+    truncated résumé text on the right. In production the résumé comes
+    from the ATS's candidate record; here we show the same fields we
+    already extracted at index-build time.
+    """
+    left, right = st.columns([2, 3], gap="large")
+
+    with left:
+        st.markdown(f"**Résumé ID:** `{resume.resume_id}`")
+        if resume.candidate_name:
+            st.markdown(f"**Name:** {resume.candidate_name}")
+        if resume.target_role:
+            st.markdown(f"**Target role:** {resume.target_role}")
+        yoe = (
+            f"{resume.years_experience:.1f} years"
+            if resume.years_experience is not None
+            else "not declared"
+        )
+        st.markdown(f"**Experience:** {yoe}")
+        if resume.location:
+            st.markdown(f"**Location:** {resume.location}")
+        if resume.education:
+            st.markdown(f"**Education:** {resume.education}")
+
+        st.markdown(" ")
+        st.markdown("**Skills extracted from résumé**")
+        if resume.skills:
+            skill_html = "  ".join(
+                f"<span style='display:inline-block;background:#e0e7ff;"
+                f"color:#1f3a5f;padding:2px 8px;border-radius:10px;"
+                f"font-size:11px;font-weight:500;margin:2px;'>{s}</span>"
+                for s in sorted(set(resume.skills))[:20]
+            )
+            st.markdown(skill_html, unsafe_allow_html=True)
+        else:
+            st.caption("(no explicit skills field — the retrieval layer extracts skills from the résumé text)")
+
+        st.markdown(" ")
+        st.markdown(
+            f"<div style='font-size:12px;color:#64748b;'>"
+            f"Semantic similarity vs JD: "
+            f"<b style='color:#1f3a5f;'>{watched_row['sem']:+.3f}</b>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    with right:
+        st.markdown("**Résumé text** *(as the ATS would receive it)*")
+        # Truncate to keep the panel compact — the whole point is to give
+        # the recruiter a scannable snapshot, not a full document reader.
+        text = resume.text.strip()
+        preview_chars = 900
+        if len(text) <= preview_chars:
+            st.markdown(
+                f"<div style='background:#f8fafc;border-radius:6px;"
+                f"padding:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;"
+                f"font-size:12px;line-height:1.5;color:#1e293b;"
+                f"white-space:pre-wrap;max-height:280px;overflow-y:auto;'>"
+                f"{text}</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                f"<div style='background:#f8fafc;border-radius:6px;"
+                f"padding:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;"
+                f"font-size:12px;line-height:1.5;color:#1e293b;"
+                f"white-space:pre-wrap;max-height:280px;overflow-y:auto;'>"
+                f"{text[:preview_chars]}…</div>",
+                unsafe_allow_html=True,
+            )
+            st.caption(
+                f"Showing first {preview_chars:,} characters of {len(text):,} total. "
+                f"The full text is what SBERT + BM25 index against."
+            )
+
+
 def render_watch_step(pipe: dict) -> None:
     watching_idx = st.session_state.get("watching_resume_idx")
     if watching_idx is None:
@@ -1157,6 +1331,13 @@ def render_watch_step(pipe: dict) -> None:
         if st.button("◀ Back to shortlist", use_container_width=True):
             _set_step("shortlist")
             st.rerun()
+
+    # ── Candidate résumé viewer ──────────────────────────────────────
+    # The recruiter clicked "Watch live" on this specific candidate.
+    # Show who they are before the scenario buttons — otherwise the
+    # simulator is disconnected from the person being evaluated.
+    with st.expander("📄 Candidate résumé", expanded=False):
+        _render_candidate_resume(resume, watched_row)
 
     # ── Live SHAP waterfall — updates every interaction ──
     with st.expander("📊 Live SHAP waterfall — why the model predicts what it does",
@@ -1426,6 +1607,467 @@ def render_experience_diagnostic() -> None:
         )
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# Fairness audit panel — surfaces the results the reviewer flagged as
+# "not visible in the demo" at mid-sem.
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def render_fairness_panel() -> None:
+    """Collapsed panel showing the fairness audit results.
+
+    Reads the JSON reports written by `make audit` and `make audit-hr`.
+    Displays two audits side-by-side:
+      · Synthetic drop-off model, gender + country proxies
+      · HR Analytics real-demographics gender audit
+
+    All three regulatory-standard metrics are shown for each:
+      · Demographic parity difference
+      · Equal opportunity difference
+      · Disparate impact ratio (4/5 rule pass/fail)
+
+    Framing acknowledges NYC Local Law 144 and EU AI Act — bias auditing
+    for hiring AI is now a legal requirement, not just an ethical
+    preference.
+    """
+    import json
+    from pathlib import Path
+
+    project_root = Path(__file__).resolve().parents[3]
+    synth_path = project_root / "reports" / "fairness_synthetic.json"
+    hr_path = project_root / "reports" / "fairness_hr.json"
+
+    with st.expander(
+        "Fairness audit  ·  bias metrics for the ranking + drop-off model  (click to expand)",
+        expanded=False,
+    ):
+        st.markdown(
+            "**Regulatory context.** Since July 2023, NYC Local Law 144 requires "
+            "bias audits for any Automated Employment Decision Tool used to "
+            "screen candidates for jobs in the city. The EU AI Act (2024) "
+            "classifies recruitment-scoring systems as *high-risk* and "
+            "mandates fairness assessment. The metrics below are what those "
+            "regulations expect."
+        )
+
+        # ── Load both reports (graceful fallback if a file is missing) ──
+        synth = None
+        hr = None
+        if synth_path.exists():
+            synth = json.loads(synth_path.read_text())
+        if hr_path.exists():
+            hr = json.loads(hr_path.read_text())
+
+        if synth is None and hr is None:
+            st.warning(
+                "No fairness reports found. Run `make audit && make audit-hr` "
+                "to generate them (~3 minutes)."
+            )
+            return
+
+        # ── Side-by-side comparison ─────────────────────────────────────
+        col_left, col_right = st.columns(2, gap="large")
+
+        with col_left:
+            st.markdown("#### Audit 1 · Synthetic drop-off model")
+            if synth is None:
+                st.caption("Not yet generated. Run `make audit`.")
+            else:
+                st.caption(
+                    "Drop-off classifier evaluated on the HF-fit test split, "
+                    "with gender and country inferred from résumé text as "
+                    "proxies. Model: `" + synth.get("model_used", "unknown") + "`"
+                )
+                _render_fairness_summary(
+                    "Gender proxy (name-based)",
+                    synth.get("gender_proxy", {}),
+                )
+                st.markdown("")
+                _render_fairness_summary(
+                    "Country proxy (text-based)",
+                    synth.get("country_proxy", {}),
+                )
+
+        with col_right:
+            st.markdown("#### Audit 2 · Real HR demographics")
+            if hr is None:
+                st.caption("Not yet generated. Run `make audit-hr`.")
+            else:
+                st.caption(
+                    f"Kaggle HR Analytics ~19,000 rows.  "
+                    f"Audited {hr.get('n_audited', 0):,} test rows on "
+                    "real (not proxied) gender labels. The model was "
+                    "trained without seeing the gender feature — the "
+                    "audit surfaces bias that arises indirectly through "
+                    "correlated proxies."
+                )
+                _render_fairness_summary(
+                    f"Gender (real) — attribute: '{hr.get('attribute', '')}'",
+                    hr,
+                )
+
+        st.markdown("---")
+        st.markdown(
+            "**Interpretation targets:**  "
+            "Demographic parity diff ≤ 0.10 = strong.  "
+            "Equal opportunity diff ≤ 0.10 = strong.  "
+            "Disparate impact ratio ≥ 0.80 passes the EEOC 4/5 rule."
+        )
+        st.caption(
+            "Reports:  `reports/fairness_synthetic.json`  ·  `reports/fairness_hr.json`  "
+            "Reproduce:  `make audit && make audit-hr`  ·  "
+            "Code:  `src/recruit/fairness/audit_dropoff.py`"
+        )
+
+
+def _render_fairness_summary(title: str, report: dict) -> None:
+    """Render one fairness summary block — metrics + group breakdown."""
+    if not report:
+        st.caption(f"{title}: no data.")
+        return
+
+    dp = report.get("demographic_parity_diff", 0.0)
+    eo = report.get("equal_opportunity_diff", 0.0)
+    di = report.get("disparate_impact_ratio", 0.0)
+    passes = report.get("passes_4_5_rule", False)
+
+    def _colour_for(value: float, threshold: float, direction: str = "below") -> str:
+        """Green if the value passes the threshold, red otherwise."""
+        good = (value <= threshold) if direction == "below" else (value >= threshold)
+        return "#16a34a" if good else "#dc2626"
+
+    st.markdown(f"**{title}**")
+
+    m1, m2, m3 = st.columns(3)
+    with m1:
+        st.markdown(
+            f"<div style='text-align:center;'>"
+            f"<div style='font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:0.4px;'>DP diff</div>"
+            f"<div style='font-size:22px;font-weight:700;color:{_colour_for(dp, 0.10, 'below')};line-height:1.1;'>"
+            f"{dp:.3f}</div>"
+            f"<div style='font-size:10px;color:#94a3b8;'>≤ 0.10 target</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+    with m2:
+        st.markdown(
+            f"<div style='text-align:center;'>"
+            f"<div style='font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:0.4px;'>EO diff</div>"
+            f"<div style='font-size:22px;font-weight:700;color:{_colour_for(eo, 0.10, 'below')};line-height:1.1;'>"
+            f"{eo:.3f}</div>"
+            f"<div style='font-size:10px;color:#94a3b8;'>≤ 0.10 target</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+    with m3:
+        st.markdown(
+            f"<div style='text-align:center;'>"
+            f"<div style='font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:0.4px;'>DI ratio</div>"
+            f"<div style='font-size:22px;font-weight:700;color:{_colour_for(di, 0.80, 'above')};line-height:1.1;'>"
+            f"{di:.3f}</div>"
+            f"<div style='font-size:10px;color:#94a3b8;'>{'✓ PASS' if passes else '✗ FAIL'} 4/5 rule</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    # Per-group breakdown (if available)
+    groups = report.get("groups", [])
+    if groups:
+        import pandas as pd
+        df = pd.DataFrame([
+            {
+                "Group": g["group"],
+                "N": g["n"],
+                "Base rate": g["base_rate"],
+                "Selection rate": g["selection_rate"],
+                "TPR": g["tpr"],
+                "FPR": g["fpr"],
+            }
+            for g in groups
+        ])
+        st.dataframe(df, hide_index=True, use_container_width=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Step 4 — Post-offer decline (PoC extension)
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def render_postoffer_step(pipe: dict) -> None:
+    """Post-offer decline prediction — end-sem extension.
+
+    Responds to mid-sem reviewer feedback that post-offer drop-off has
+    higher business value than mid-application drop-off. Same XGBoost +
+    isotonic calibration + SHAP + RAG framework as the résumé-submission
+    model — only the features differ (compensation gap, response latency,
+    negotiation rounds, competing-offer signal, etc.).
+    """
+    predictor = pipe.get("postoffer_predictor")
+
+    st.subheader("Post-offer decline — extension proof-of-concept")
+    st.caption(
+        "This screen extends the drop-off framework to the post-offer stage of the funnel. "
+        "The reviewer noted at mid-sem that post-offer decline has higher business value "
+        "than mid-application drop-off. Same pipeline as Step 3, different features."
+    )
+
+    if predictor is None:
+        st.warning(
+            "Post-offer model not trained yet. Run:\n\n"
+            "```\nmake generate-postoffer-data && make train-postoffer\n```\n\n"
+            "to build the artefact. The rest of the demo (Steps 1–3) is unaffected."
+        )
+        return
+
+    from recruit.postoffer.predict import OFFER_SCENARIOS, SCENARIO_LABELS
+
+    # ── Scenario picker + current-state display ────────────────────────
+    st.markdown("**Simulate an offer situation**")
+    st.caption(
+        "Each button loads a preset feature vector — the values that an ATS "
+        "would emit at offer time (salary gap, days from interview to offer, "
+        "candidate response latency, negotiation rounds, competing-offer signal, "
+        "and candidate profile). No form-filling required."
+    )
+
+    sc_a, sc_b, sc_c, sc_d = st.columns(4)
+    with sc_a:
+        if st.button(SCENARIO_LABELS["likely_accept"],
+                     use_container_width=True,
+                     help="Strong offer, well-matched candidate, remote available, fast response."):
+            st.session_state["postoffer_scenario"] = "likely_accept"
+            st.rerun()
+    with sc_b:
+        if st.button(SCENARIO_LABELS["uncertain"],
+                     use_container_width=True,
+                     help="Reasonable offer with some friction — long commute, moderate negotiation."):
+            st.session_state["postoffer_scenario"] = "uncertain"
+            st.rerun()
+    with sc_c:
+        if st.button(SCENARIO_LABELS["likely_decline"],
+                     use_container_width=True,
+                     help="Weak offer, competing option, long commute, slow response."):
+            st.session_state["postoffer_scenario"] = "likely_decline"
+            st.rerun()
+    with sc_d:
+        if st.button("Reset", use_container_width=True,
+                     help="Clear the current scenario."):
+            st.session_state.pop("postoffer_scenario", None)
+            st.session_state.pop("postoffer_llm_rationale", None)
+            st.rerun()
+
+    scenario_key = st.session_state.get("postoffer_scenario")
+    if scenario_key is None:
+        st.info(
+            "No scenario loaded yet. Click a scenario above to see how the model "
+            "and SHAP explanation respond."
+        )
+        return
+
+    situation = OFFER_SCENARIOS[scenario_key]
+    prediction = predictor.predict(situation)
+
+    # ── Two-column layout: SHAP waterfall + right-side signal card ─────
+    main_col, side_col = st.columns([3, 2], gap="large")
+
+    with main_col:
+        # SHAP waterfall
+        with st.expander(
+            "SHAP waterfall — why the model predicts this decline probability",
+            expanded=True,
+        ):
+            try:
+                fig = predictor._explainer.waterfall_figure(
+                    prediction.feature_row,
+                    top_k=8,
+                    height_inches=3.5,
+                )
+                st.pyplot(fig, use_container_width=True)
+                import matplotlib.pyplot as plt
+                plt.close(fig)
+                st.caption(
+                    "Each bar is one feature's log-odds contribution to the "
+                    "decline prediction. Green pushes toward accepting; red "
+                    "toward declining."
+                )
+            except Exception as e:  # noqa: BLE001
+                st.warning(f"SHAP waterfall unavailable: {e}")
+
+        # Candidate rationale panel (LLM + templated baseline)
+        with st.expander(
+            "Candidate rationale · LLM-generated, SHAP-grounded",
+            expanded=False,
+        ):
+            st.markdown(
+                "A local LLM composes the natural-language rationale below, "
+                "constrained to the top-3 SHAP drivers shown as evidence. The "
+                "model is instructed to **rephrase evidence only** — "
+                "introducing a claim not supported by the evidence would "
+                "constitute a faithfulness failure."
+            )
+
+            drivers_text = prediction.shap_context_text(top_k=3)
+            st.markdown("**Evidence provided to the model** *(top-3 SHAP drivers, log-odds):*")
+            st.code(drivers_text, language=None)
+
+            regen_key = f"postoffer_llm_rationale_{scenario_key}"
+            col_btn, col_note = st.columns([1, 3])
+            with col_btn:
+                regen = st.button(
+                    "Generate rationale",
+                    key=f"regen_postoffer_{scenario_key}",
+                    use_container_width=True,
+                    help="Calls the local LLM (Ollama) to compose a plain-"
+                         "English rationale grounded in the SHAP evidence.",
+                )
+            with col_note:
+                st.caption(
+                    "The rationale is grounded in the SHAP evidence above — "
+                    "the LLM cannot introduce new claims about the candidate "
+                    "or the offer."
+                )
+
+            if regen:
+                with st.spinner("Generating rationale via local LLM…"):
+                    try:
+                        rationale = _generate_postoffer_llm_rationale(
+                            situation, prediction
+                        )
+                        st.session_state[regen_key] = rationale
+                    except Exception as e:  # noqa: BLE001
+                        st.error(f"LLM call failed: {e}")
+                        st.session_state[regen_key] = None
+
+            if st.session_state.get(regen_key):
+                st.markdown(
+                    "**LLM-generated rationale** *(grounded in the evidence above):*"
+                )
+                st.markdown(
+                    f"<div style='padding:10px;background:#eff6ff;border-radius:6px;"
+                    f"border-left:3px solid #8b5cf6;font-size:13px;line-height:1.5;'>"
+                    f"{st.session_state[regen_key]}</div>",
+                    unsafe_allow_html=True,
+                )
+
+    with side_col:
+        # Risk signal card — mirrors the drop-off Live-watch signal
+        p_pct = prediction.probability * 100
+        color = {"low": "#16a34a", "moderate": "#ca8a04", "high": "#dc2626"}[
+            prediction.risk_band
+        ]
+        st.markdown(
+            f"<div style='background:{color};color:white;border-radius:12px;"
+            f"padding:18px;text-align:center;'>"
+            f"<div style='font-size:36px;font-weight:700;line-height:1.0;'>"
+            f"{p_pct:.0f}%</div>"
+            f"<div style='font-size:11px;opacity:0.9;margin-top:4px;'>"
+            f"{prediction.risk_band.upper()} RISK · P(decline)</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+        st.markdown(" ")
+        st.markdown("**Scenario details**")
+        st.markdown(
+            f"<div style='font-size:12px;color:#334155;line-height:1.7;'>"
+            f"Salary gap vs expectation: <b>{situation.offer_salary_gap_pct:+.0%}</b><br/>"
+            f"Days interview → offer: <b>{situation.days_interview_to_offer:.0f}</b><br/>"
+            f"Interview rounds: <b>{situation.interview_rounds}</b><br/>"
+            f"Response latency: <b>{situation.candidate_response_hours:.0f} h</b><br/>"
+            f"Negotiation rounds: <b>{situation.negotiation_rounds}</b><br/>"
+            f"Competing offer: <b>{'yes' if situation.competing_offer_signal else 'no'}</b><br/>"
+            f"Commute: <b>{situation.commute_minutes:.0f} min</b><br/>"
+            f"Remote option: <b>{'yes' if situation.remote_option else 'no'}</b><br/>"
+            f"Candidate YOE: <b>{situation.cand_yoe:.0f}</b><br/>"
+            f"Seniority tier: <b>{situation.cand_seniority_tier}/5</b><br/>"
+            f"Currently employed: <b>{'yes' if situation.cand_currently_employed else 'no'}</b><br/>"
+            f"Company brand tier: <b>{'top-tier' if situation.company_brand_tier else 'other'}</b>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+        st.markdown(" ")
+        st.markdown("**Top drivers (SHAP)**")
+        for attr in prediction.explanation.top_attributions[:3]:
+            arrow_color = "#dc2626" if attr.value > 0 else "#16a34a"
+            direction_text = "↑ decline" if attr.value > 0 else "↓ decline"
+            st.markdown(
+                f"<div style='font-size:11.5px;color:#334155;margin-top:2px;'>"
+                f"<code style='font-size:11px;'>{attr.feature}</code>  "
+                f"<span style='color:{arrow_color};font-weight:600;'>"
+                f"{direction_text}  {attr.value:+.2f}</span></div>",
+                unsafe_allow_html=True,
+            )
+
+    # ── Bottom banner — the PoC honesty statement ──────────────────────
+    st.markdown(" ")
+    st.info(
+        "**Proof-of-concept honesty statement.** The post-offer decline model "
+        "is trained on synthetic labels — no public dataset labels real "
+        "post-offer decline events. The pipeline and framework are what this "
+        "screen demonstrates. Production deployment would require partnership "
+        "with an ATS vendor for real offer-lifecycle telemetry. Model artefact: "
+        "`models/postoffer_v1_calibrated.joblib`. Reproduce with "
+        "`make generate-postoffer-data && make train-postoffer`."
+    )
+
+
+def _generate_postoffer_llm_rationale(situation, prediction) -> str:
+    """Build an Ollama prompt for the post-offer scenario, call, return prose.
+
+    Reuses the LLM RAG explainer pattern from `explain/llm_rag.py`, but with
+    a prompt customised for the offer-lifecycle context rather than the
+    mid-application flow. Fails gracefully — errors bubble up to the caller
+    which shows an st.error message.
+    """
+    from recruit.config import settings
+    import ollama
+
+    system_prompt = (
+        "You are a recruitment-assistant explainer for the post-offer stage. "
+        "Given a candidate's offer situation, the model's predicted decline "
+        "probability, and the top SHAP drivers, produce ONE concise plain-"
+        "English rationale in 1-2 sentences. You must: (1) cite ONLY the "
+        "evidence given, (2) reference at least one top SHAP driver, "
+        "(3) never invent facts not present in the inputs."
+    )
+    user_prompt = f"""
+CANDIDATE OFFER SITUATION
+- Salary gap vs candidate expectation: {situation.offer_salary_gap_pct:+.0%}
+- Days from interview to offer: {situation.days_interview_to_offer:.0f}
+- Interview rounds: {situation.interview_rounds}
+- Candidate response latency: {situation.candidate_response_hours:.0f} hours
+- Negotiation rounds: {situation.negotiation_rounds}
+- Competing offer mentioned: {"yes" if situation.competing_offer_signal else "no"}
+- Commute (one-way): {situation.commute_minutes:.0f} minutes
+- Remote option available: {"yes" if situation.remote_option else "no"}
+- Candidate years of experience: {situation.cand_yoe:.0f}
+- Candidate seniority tier: {situation.cand_seniority_tier}/5
+- Candidate currently employed: {"yes" if situation.cand_currently_employed else "no"}
+- Company brand tier: {"top-tier" if situation.company_brand_tier else "other"}
+
+MODEL OUTPUT
+- Predicted P(decline): {prediction.probability * 100:.0f}%
+- Risk band: {prediction.risk_band}
+
+EVIDENCE — TOP SHAP DRIVERS (log-odds contributions)
+{prediction.shap_context_text(top_k=3)}
+
+Write the rationale as one continuous plain-English sentence (or at most two).
+Do NOT output JSON, headers, or bullet points. Do NOT invent facts.
+""".strip()
+
+    response = ollama.chat(
+        model=settings.ollama_model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": user_prompt},
+        ],
+        options={"temperature": 0.3},
+    )
+    return response["message"]["content"].strip()
+
+
 def main() -> None:
     st.set_page_config(
         page_title="AI Recruitment Assistant",
@@ -1567,6 +2209,10 @@ def main() -> None:
     render_step_navigator()
     st.markdown("&nbsp;", unsafe_allow_html=True)  # small vertical spacer
 
+    # Fairness audit panel — collapsed by default, always accessible.
+    # Directly addresses mid-sem reviewer's "fairness not visible in demo".
+    render_fairness_panel()
+
     step = _current_step()
     if step == "search":
         render_search_step(pipe, config)
@@ -1574,6 +2220,8 @@ def main() -> None:
         render_shortlist_step()
     elif step == "watch":
         render_watch_step(pipe)
+    elif step == "postoffer":
+        render_postoffer_step(pipe)
     else:
         st.error(f"Unknown step: {step}")
         _set_step("search")

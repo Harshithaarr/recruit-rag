@@ -199,6 +199,42 @@ def _dropoff_audit(variant: str = "v0") -> None:
     )
     print(format_fairness_table(s_country))
 
+    # ── Persist JSON report so the UI can render this ─────────────────
+    from pathlib import Path
+    project_root = Path(__file__).resolve().parents[1]
+    out_path = project_root / "reports" / "fairness_synthetic.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _serialise(summary):
+        return {
+            "attribute": summary.attribute,
+            "threshold": summary.threshold,
+            "demographic_parity_diff": summary.demographic_parity_diff,
+            "equal_opportunity_diff": summary.equal_opportunity_diff,
+            "disparate_impact_ratio": summary.disparate_impact_ratio,
+            "passes_4_5_rule": summary.passes_4_5_rule(),
+            "groups": [
+                {
+                    "group": g.group,
+                    "n": g.n,
+                    "base_rate": g.base_rate,
+                    "selection_rate": g.selection_rate,
+                    "tpr": g.tpr,
+                    "fpr": g.fpr,
+                }
+                for g in summary.groups
+            ],
+        }
+
+    report = {
+        "variant": variant,
+        "model_used": model_path.name,
+        "gender_proxy": _serialise(s_gender),
+        "country_proxy": _serialise(s_country),
+    }
+    out_path.write_text(json.dumps(report, indent=2))
+    print(f"\nWrote fairness report → {out_path.relative_to(project_root)}")
+
 
 def main() -> None:
     ap = argparse.ArgumentParser()
