@@ -43,12 +43,31 @@ class DropoffPrediction:
     `feature_row` is the exact dict the model scored — kept so the UI can
     regenerate per-prediction artefacts (e.g. the SHAP waterfall) without
     re-running feature extraction.
+
+    ABSTENTION FIELDS (end-sem addition)
+    -----------------------------------
+    Because our probabilities are isotonic-calibrated, we can turn the
+    calibration into a **trust feature**: report how confident the model
+    is in its own prediction. Confidence is high when the probability is
+    far from 0.5 (the decision boundary); low when it's near 0.5.
+
+    · `confidence`      float in [0, 1] — 1.0 = perfectly certain,
+                        0.0 = maximum uncertainty (p = 0.5)
+    · `abstention_band` str "confident" | "uncertain" | "abstain"
+                        — the interpretable version, for UI badges
+
+    Recommended UI behaviour: when the band is `"abstain"`, present the
+    recommendation as "route to human review" rather than trusting the
+    model's binary classification. Follows the selective-prediction
+    literature (El-Yaniv & Wiener 2010, Geifman & El-Yaniv 2017).
     """
 
     resume_id: str
     job_id: str
     probability: float
     risk_band: str  # "low" | "moderate" | "high"
+    confidence: float  # ∈ [0, 1] — 1 = certain, 0 = maximum entropy at p=0.5
+    abstention_band: str  # "confident" | "uncertain" | "abstain"
     explanation: LocalExplanation
     feature_row: dict
 
@@ -63,6 +82,44 @@ def _risk_band(p: float) -> str:
     if p < 0.60:
         return "moderate"
     return "high"
+
+
+def _confidence(p: float) -> float:
+    """Confidence = 1 − normalised Bernoulli entropy.
+
+    Bernoulli entropy H(p) = -p·log(p) - (1-p)·log(1-p).
+    Max at p=0.5 (H = log 2 ≈ 0.693), min at p=0 or p=1 (H = 0).
+    We normalise to [0, 1] and flip so 1 = confident, 0 = uncertain.
+    Guard against log(0) with a small epsilon.
+    """
+    import math
+    eps = 1e-9
+    p_c = min(max(p, eps), 1.0 - eps)
+    h = -p_c * math.log(p_c) - (1.0 - p_c) * math.log(1.0 - p_c)
+    normalized_entropy = h / math.log(2.0)  # ∈ [0, 1]
+    return float(1.0 - normalized_entropy)
+
+
+def _abstention_band(confidence: float) -> str:
+    """Bucket confidence into interpretable bands for the UI.
+
+    Thresholds tuned so that the vast majority of predictions land in
+    `confident` (i.e. the model is trusted to decide), and only near-
+    50-50 predictions get flagged for human review. Concrete boundaries:
+
+      · `confident`  p < 0.30 or p > 0.70   → confidence ≳ 0.12
+      · `uncertain`  p ∈ [0.30, 0.40] ∪ [0.60, 0.70]  → confidence 0.03-0.12
+      · `abstain`    p ∈ [0.40, 0.60]                  → confidence < 0.03
+
+    An `abstain` verdict is a *feature*, not a failure: the model is
+    telling the recruiter "I would coin-flip on this one — please
+    review manually." Follows the selective-prediction literature.
+    """
+    if confidence >= 0.12:
+        return "confident"
+    if confidence >= 0.03:
+        return "uncertain"
+    return "abstain"
 
 
 class DropoffPredictor:
@@ -115,11 +172,14 @@ class DropoffPredictor:
             top_k=5,
         )
 
+        confidence = _confidence(prob)
         return DropoffPrediction(
             resume_id=resume.resume_id,
             job_id=job.job_id,
             probability=prob,
             risk_band=_risk_band(prob),
+            confidence=confidence,
+            abstention_band=_abstention_band(confidence),
             explanation=explanation,
             feature_row=feature_row,
         )

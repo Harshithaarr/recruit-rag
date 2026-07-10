@@ -784,7 +784,28 @@ def render_live_watch_panel(
             unsafe_allow_html=True,
         )
 
-        if prediction.probability >= 0.5:
+        # ── Confidence / abstention badge (selective prediction) ──────
+        # If the calibrated probability is near 0.5 the model can honestly
+        # say "I would coin-flip on this one — route to human review".
+        # Turns the calibration property into a trust feature.
+        band = getattr(prediction, "abstention_band", "confident")
+        conf = getattr(prediction, "confidence", 1.0)
+        if band == "abstain":
+            st.warning(
+                f"⚖️  **Model is uncertain — recommend human review.**  \n"
+                f"Confidence {conf:.2f} · P is near the 50/50 boundary. "
+                f"Selective prediction principle: calibrated models should "
+                f"decline to decide when they cannot be trusted.",
+                icon="⚖️",
+            )
+        elif band == "uncertain":
+            st.info(
+                f"Model confidence: **{conf:.2f}** (moderate). "
+                f"Consider a secondary review for this candidate.",
+                icon="ℹ️",
+            )
+
+        if prediction.probability >= 0.5 and band != "abstain":
             st.error(
                 "**Reach out now** — candidate showing drop-off signals.",
                 icon="🚨",
@@ -1167,6 +1188,142 @@ def render_search_step(pipe: dict, config: dict) -> None:
 # ─────────────────────────────────────────────────────────────────────────
 
 
+def _render_jd_health_panel(rows: list[dict]) -> None:
+    """JD-level health score display — aggregates the shortlist's drop-off
+    signals into a per-posting view.
+    """
+    from recruit.dropoff.jd_health import compute_jd_health
+
+    report = compute_jd_health(rows)
+    if report.n_candidates == 0:
+        st.info("No candidates to aggregate.")
+        return
+
+    st.caption(
+        "Aggregate view: instead of triaging each candidate one by one, look "
+        "at what the *shortlist as a whole* tells you about the JD posting. "
+        "The health score reflects how well this posting attracts and retains "
+        "matching candidates."
+    )
+
+    # ── Health headline strip ─────────────────────────────────────────
+    band_style = {
+        "healthy":     ("#16a34a", "HEALTHY",     "Posting attracts candidates who complete the funnel."),
+        "moderate":    ("#ca8a04", "MODERATE",    "Some candidates at risk of dropping off — worth inspecting."),
+        "concerning":  ("#dc2626", "CONCERNING",  "The posting is losing a large share of the shortlist."),
+    }
+    colour, label, subtitle = band_style[report.health_band]
+
+    st.markdown(
+        f"<div style='padding:14px 18px;background:{colour}22;border-left:5px solid {colour};"
+        f"border-radius:8px;margin-top:6px;'>"
+        f"<div style='font-size:11px;color:{colour};font-weight:700;letter-spacing:2px;'>"
+        f"{label}</div>"
+        f"<div style='font-size:26px;font-weight:800;color:{colour};line-height:1.1;margin-top:4px;'>"
+        f"{report.health_score * 100:.0f}<span style='font-size:14px;font-weight:600;color:#64748b;'> / 100</span></div>"
+        f"<div style='font-size:12px;color:#334155;margin-top:6px;'>{subtitle}</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(" ")
+
+    # ── Distribution stats — 4 metric pills ───────────────────────────
+    m1, m2, m3, m4 = st.columns(4)
+    _health_metric_pill(m1, "Mean P(drop-off)",
+                        f"{report.mean_dropoff_prob * 100:.0f}%",
+                        "across the shortlist")
+    _health_metric_pill(m2, "Median P(drop-off)",
+                        f"{report.median_dropoff_prob * 100:.0f}%",
+                        "middle candidate")
+    _health_metric_pill(m3, "% high-risk",
+                        f"{report.pct_high_risk * 100:.0f}%",
+                        "P ≥ 60%",
+                        colour="#dc2626" if report.pct_high_risk >= 0.30 else "#334155")
+    _health_metric_pill(m4, "% low-risk",
+                        f"{report.pct_low_risk * 100:.0f}%",
+                        "P < 30%",
+                        colour="#16a34a" if report.pct_low_risk >= 0.50 else "#334155")
+
+    st.markdown("---")
+    st.markdown("**Top drivers of drop-off across this shortlist**")
+    st.caption(
+        "The features most frequently appearing in a candidate's top-3 SHAP "
+        "attributions. A feature appearing here often means many candidates "
+        "in this shortlist are being flagged for the same reason — a signal "
+        "about the posting design, not just individual candidates."
+    )
+
+    if not report.top_drivers:
+        st.info("No aggregated drivers to display.")
+        return
+
+    for d in report.top_drivers:
+        pct_of_candidates = 100 * d.times_in_top_3 / d.n_candidates
+        driver_colour = "#dc2626" if d.direction.startswith("↑") else "#16a34a"
+
+        st.markdown(
+            f"<div style='padding:10px 14px;background:#f8fafc;border-radius:8px;"
+            f"border-left:3px solid {driver_colour};margin-top:6px;'>"
+            f"<div style='display:flex;justify-content:space-between;align-items:center;'>"
+            f"<div><code style='background:#e0e7ff;padding:2px 8px;border-radius:4px;"
+            f"font-size:12px;'>{d.feature}</code>  "
+            f"<span style='color:{driver_colour};font-weight:600;font-size:12px;'>"
+            f"{d.direction}</span></div>"
+            f"<div style='font-size:12px;color:#64748b;'>"
+            f"Top-3 for <b>{d.times_in_top_3}/{d.n_candidates}</b> candidates "
+            f"({pct_of_candidates:.0f}%)  ·  "
+            f"mean SHAP <b>{d.mean_shap:+.2f}</b></div>"
+            f"</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("---")
+    st.markdown("**What to do with this**")
+    if report.health_band == "healthy":
+        st.success(
+            "This posting is retaining candidates well. Continue monitoring — "
+            "the drivers above indicate positive fit signals (green ↓)."
+        )
+    elif report.health_band == "moderate":
+        st.info(
+            "Some candidates are at risk. Consider looking at the top drivers "
+            "above — if a session-behaviour feature dominates (fields skipped, "
+            "back-navigation), review the application flow for friction points."
+        )
+    else:
+        st.warning(
+            "The posting is losing a substantial share of the shortlist. "
+            "Recommended actions: (1) review the top drivers above — do they "
+            "point at friction features that a form redesign could address? "
+            "(2) use the Intervention panel on any at-risk candidate to see "
+            "specific counterfactual uplift estimates."
+        )
+
+    st.caption(
+        "Code: `src/recruit/dropoff/jd_health.py`  ·  "
+        "Reframes drop-off from per-candidate triage into a per-posting "
+        "systems signal — a second-order contribution beyond individual "
+        "predictions."
+    )
+
+
+def _health_metric_pill(col, label: str, value: str, sub: str, colour: str = "#1f3a5f") -> None:
+    """One metric pill inside the JD-health panel."""
+    with col:
+        col.markdown(
+            f"<div style='padding:10px 12px;background:#ffffff;"
+            f"border-radius:8px;border:1px solid #e2e8f0;text-align:center;'>"
+            f"<div style='font-size:10px;color:#64748b;text-transform:uppercase;"
+            f"letter-spacing:0.4px;'>{label}</div>"
+            f"<div style='font-size:22px;font-weight:700;color:{colour};"
+            f"line-height:1.1;margin-top:2px;'>{value}</div>"
+            f"<div style='font-size:10px;color:#94a3b8;'>{sub}</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+
 def render_shortlist_step() -> None:
     if "search_rows" not in st.session_state:
         st.warning("No search results yet. Go back to Step 1.")
@@ -1204,6 +1361,16 @@ def render_shortlist_step() -> None:
 
     with st.expander("Job description used"):
         st.write((jd_text[:400] + "…") if len(jd_text) > 400 else jd_text)
+
+    # ── Job-posting health score — end-sem addition ───────────────────
+    # Aggregates the shortlist's predictions into a per-posting signal.
+    # Reframes drop-off from per-candidate triage into a systems signal
+    # about the posting itself.
+    with st.expander(
+        "📊 Job-posting health  ·  what this posting is losing candidates on",
+        expanded=False,
+    ):
+        _render_jd_health_panel(rows[:top_k])
 
     short_secondary = ""
     if compare and secondary_filename:
@@ -1302,6 +1469,486 @@ def _render_candidate_resume(resume: Resume, watched_row: dict) -> None:
             )
 
 
+def find_similar_candidates(
+    pipe: dict,
+    query_resume_idx: int,
+    top_k: int = 5,
+) -> list[dict]:
+    """Return top-K candidates most similar to the query candidate.
+
+    Uses SBERT cosine similarity as the primary signal (via the FAISS
+    IndexFlatIP already built for retrieval), and pulls the trajectory
+    features for display alongside. Excludes the query candidate itself.
+
+    This is query-by-example — the recruiter says "find more like THIS
+    person" rather than "find candidates for THIS job description".
+    Uses the same embedding space as the retrieval channel, so no new
+    infrastructure is needed.
+    """
+    encoder = pipe["encoder"]
+    dense_idx = pipe["dense"]
+    resumes = pipe["resumes"]
+    exp_idx = pipe.get("experience")
+
+    query_resume: Resume = resumes[query_resume_idx]
+    query_vec = encoder.encode([query_resume.text])[0]
+
+    # Fetch top_k+1 so we can drop the query itself and still return top_k.
+    hits = dense_idx.search(query_vec, k=top_k + 1)
+
+    results: list[dict] = []
+    for h in hits:
+        if h.index == query_resume_idx:
+            continue
+        cand_resume = resumes[h.index]
+        cand_traj = exp_idx.trajectories[h.index] if exp_idx else None
+        results.append({
+            "resume_idx": h.index,
+            "resume": cand_resume,
+            "sbert_cosine": float(h.score),
+            "trajectory": cand_traj,
+        })
+        if len(results) >= top_k:
+            break
+
+    return results
+
+
+def _render_similar_candidates_panel(pipe: dict, watched_row: dict) -> None:
+    """Inline panel: search + display for the query-by-example feature."""
+    resume: Resume = watched_row["resume"]
+
+    st.caption(
+        "Search the whole corpus for candidates whose résumé embedding is closest to this one. "
+        "Useful for cloning the profile of a past successful hire or exploring the "
+        "neighbourhood of a strong candidate."
+    )
+
+    col_l, col_r = st.columns([2, 1])
+    with col_l:
+        st.markdown(
+            f"**Reference candidate:** `{resume.resume_id}`  ·  "
+            f"{resume.years_experience:.0f} YOE"
+            if resume.years_experience is not None else
+            f"**Reference candidate:** `{resume.resume_id}`"
+        )
+    with col_r:
+        top_k_sim = st.number_input(
+            "Show",
+            min_value=3, max_value=10, value=5, step=1,
+            key=f"sim_top_k_{watched_row['resume_idx']}",
+            label_visibility="collapsed",
+        )
+
+    if st.button(
+        "🔍 Find similar candidates",
+        key=f"sim_go_{watched_row['resume_idx']}",
+        type="primary",
+    ):
+        with st.spinner("Searching the SBERT embedding neighbourhood…"):
+            results = find_similar_candidates(
+                pipe, watched_row["resume_idx"], top_k=int(top_k_sim)
+            )
+        st.session_state[f"sim_results_{watched_row['resume_idx']}"] = results
+        st.rerun()
+
+    results = st.session_state.get(f"sim_results_{watched_row['resume_idx']}", None)
+    if not results:
+        st.info(
+            "Click the button above to search. Results appear here — showing "
+            "the top-K candidates whose semantic profile is most like this one."
+        )
+        return
+
+    st.markdown(" ")
+    st.markdown(f"**Top {len(results)} similar candidates**")
+    for rank, res in enumerate(results, start=1):
+        r: Resume = res["resume"]
+        traj = res["trajectory"]
+        cos = res["sbert_cosine"]
+        cos_pct = int(round(cos * 100))
+
+        # Colour by cosine similarity strength.
+        if cos >= 0.75:
+            colour = "#16a34a"  # strong
+        elif cos >= 0.55:
+            colour = "#ca8a04"  # moderate
+        else:
+            colour = "#64748b"  # weak
+
+        traj_bits = []
+        if traj is not None:
+            if traj.years_experience is not None:
+                traj_bits.append(f"{traj.years_experience:.0f} YOE")
+            if traj.seniority.name != "UNKNOWN":
+                traj_bits.append(traj.seniority.name.lower())
+            if traj.domain != "general":
+                traj_bits.append(traj.domain)
+            if traj.company_tier == 1:
+                traj_bits.append("Tier-1")
+            if traj.n_recent_roles > 0 and traj.recent_yoe:
+                traj_bits.append(f"{traj.recent_yoe:.0f}y recent")
+        traj_line = "  ·  ".join(traj_bits) if traj_bits else "trajectory features unavailable"
+
+        # Preview of résumé text — first line, no line breaks.
+        preview = " ".join(r.text.split()[:20])
+        if len(r.text.split()) > 20:
+            preview += " …"
+
+        st.markdown(
+            f"<div style='padding:10px 14px;background:#f8fafc;border-radius:8px;"
+            f"border-left:4px solid {colour};margin-top:8px;'>"
+            f"<div style='display:flex;justify-content:space-between;align-items:center;'>"
+            f"<div><span style='color:#64748b;font-size:12px;'>#{rank}</span>  "
+            f"<code style='background:#e0e7ff;padding:1px 6px;border-radius:4px;"
+            f"font-size:12px;'>{r.resume_id}</code></div>"
+            f"<div style='color:{colour};font-weight:700;font-size:15px;'>"
+            f"{cos_pct}% similar</div></div>"
+            f"<div style='font-size:12px;color:#334155;margin-top:6px;'>"
+            f"<b>Trajectory:</b> {traj_line}</div>"
+            f"<div style='font-size:12px;color:#64748b;margin-top:4px;font-style:italic;'>"
+            f"{preview}</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    st.caption(
+        "Cosine similarity is measured in the 384-dimensional SBERT embedding "
+        "space. Trajectory metadata (YOE, seniority, domain, Tier-1 flag) is "
+        "shown to help interpret why the model considers each candidate similar."
+    )
+
+
+def _render_drift_panel(live_prediction) -> None:
+    """Distribution-drift monitor display.
+
+    Loads the training-time distribution stats for session features,
+    compares the current live session state to those distributions,
+    and flags features that are out-of-distribution (|z| > 2).
+    """
+    from recruit.dropoff.drift import compute_drift
+
+    st.caption(
+        "The drop-off model was trained on synthetic session behaviour. "
+        "This panel checks whether the *current* session's features match "
+        "the training distribution. If a feature is out-of-distribution "
+        "(|z-score| > 2), the model's prediction for this session is "
+        "**extrapolating** — treat the risk score with caution."
+    )
+
+    try:
+        drift = compute_drift(live_prediction.feature_row)
+    except FileNotFoundError as e:
+        st.warning(f"Cannot compute drift: {e}")
+        return
+
+    # ── Overall verdict banner ────────────────────────────────────────
+    verdict_style = {
+        "in_distribution":         ("#16a34a", "IN-DISTRIBUTION",
+                                    "All session features fall within the training distribution. Prediction is on solid ground."),
+        "one_feature_drifting":    ("#ca8a04", "ONE FEATURE DRIFTING",
+                                    "One session feature is outside the training distribution. Prediction is extrapolating on that feature — read the score with caution."),
+        "multiple_features_drifting": ("#dc2626", "MULTIPLE FEATURES DRIFTING",
+                                       "Several session features are outside the training distribution. This session doesn't look like the data the model learned from — human review strongly recommended."),
+    }
+    colour, label, subtitle = verdict_style[drift.overall_verdict]
+
+    st.markdown(
+        f"<div style='padding:14px 18px;background:{colour}22;border-left:5px solid {colour};"
+        f"border-radius:8px;margin-top:6px;'>"
+        f"<div style='font-size:11px;color:{colour};font-weight:700;letter-spacing:2px;'>"
+        f"{label}</div>"
+        f"<div style='font-size:22px;font-weight:800;color:{colour};line-height:1.1;margin-top:4px;'>"
+        f"Max |z| = {drift.max_abs_z:.2f}</div>"
+        f"<div style='font-size:12px;color:#334155;margin-top:6px;'>{subtitle}</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(" ")
+
+    # ── Per-feature table ─────────────────────────────────────────────
+    import pandas as pd
+    rows_df = []
+    for feat, s in drift.per_feature.items():
+        rows_df.append({
+            "Feature": feat.replace("session_", ""),
+            "Live": f"{s['live']:.1f}",
+            "Train mean": f"{s['train_mean']:.1f}",
+            "Train std": f"{s['train_std']:.1f}",
+            "Train p05 – p95": f"{s['train_p05']:.1f} – {s['train_p95']:.1f}",
+            "|z|": f"{s['abs_z']:.2f}",
+            "Flag": "⚠️ drift" if s["flagged"] else "✓ OK",
+        })
+    df = pd.DataFrame(rows_df).sort_values("|z|", ascending=False)
+    st.dataframe(df, hide_index=True, use_container_width=True)
+
+    st.caption(
+        "The `Flag` column shows features where the live value is more than "
+        "two standard deviations from the training mean — i.e. rarer than "
+        "roughly the 2nd or 98th percentile of the training distribution. "
+        "Code: `src/recruit/dropoff/drift.py`  ·  "
+        "Reproduces from the training parquet at load time."
+    )
+
+
+def _render_skill_adjacency_panel(pipe: dict, watched_row: dict) -> None:
+    """Skill-gap adjacency map display.
+
+    Extracts required skills from the JD text and candidate skills from
+    the résumé, then classifies each required skill as matched / adjacent /
+    missing using SBERT cosine similarity between skill strings.
+    """
+    from recruit.retrieval.skill_adjacency import build_skill_adjacency_report
+    from recruit.skills import extract_skills
+
+    jd_text = st.session_state.get("watch_jd_text", "") or st.session_state.get("search_jd_text", "")
+    if not jd_text:
+        st.warning("No JD text found. Run a search first (Step 1).")
+        return
+
+    resume: Resume = watched_row["resume"]
+    required_skills = sorted(extract_skills(jd_text))
+    if not required_skills:
+        st.info(
+            "No required skills could be extracted from the JD text. This can "
+            "happen for very short or abstract JDs — the skill extractor "
+            "matches against a curated dictionary of ~80 tech skills."
+        )
+        return
+
+    cand_skills = sorted(set(resume.skills) if resume.skills else extract_skills(resume.text))
+
+    st.caption(
+        "Every required skill in the JD is scored against the candidate's skill "
+        "list. Matches are classified into three bands via SBERT cosine "
+        "similarity: **matched** (verbatim or ≥ 0.85 cosine), **adjacent** "
+        "(0.55 – 0.85, transferable), **missing** (< 0.55, no similar skill)."
+    )
+
+    with st.spinner("Embedding skills and computing cosine similarities…"):
+        report = build_skill_adjacency_report(required_skills, cand_skills)
+
+    # ── Summary strip ─────────────────────────────────────────────────
+    n_total = len(report.matches)
+    cov = report.coverage_score
+    st.markdown(
+        f"<div style='padding:10px 14px;background:#f1f5f9;border-radius:8px;"
+        f"margin-top:6px;font-size:14px;'>"
+        f"<b>Coverage score:</b> "
+        f"<span style='color:#1f3a5f;font-weight:700;'>{cov * 100:.0f}%</span>  "
+        f"·  <b style='color:#16a34a;'>{report.n_matched} matched</b> "
+        f"/ <b style='color:#ca8a04;'>{report.n_adjacent} adjacent</b> "
+        f"/ <b style='color:#dc2626;'>{report.n_missing} missing</b>  "
+        f"({n_total} required)"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "Coverage score weights matched at 1.0, adjacent at 0.6, missing at 0.0. "
+        "A recruiter's binary keyword-match view would report only "
+        f"{report.n_matched}/{n_total} = "
+        f"{(report.n_matched / n_total * 100 if n_total else 0):.0f}%."
+    )
+    st.markdown(" ")
+
+    # ── Three-column breakdown ────────────────────────────────────────
+    col_matched, col_adjacent, col_missing = st.columns(3, gap="medium")
+
+    def _skill_pill(text: str, colour: str, extra: str = "") -> str:
+        return (
+            f"<div style='background:{colour}22;color:{colour};"
+            f"padding:6px 12px;border-radius:16px;margin:3px 0;"
+            f"font-size:12px;line-height:1.4;border:1px solid {colour}44;'>"
+            f"<b>{text}</b>{extra}</div>"
+        )
+
+    with col_matched:
+        st.markdown("**🟢 Matched**")
+        st.caption("Verbatim or ≥ 0.85 SBERT cosine")
+        for m in report.matches:
+            if m.category != "matched":
+                continue
+            extra = ""
+            if m.best_candidate_skill and m.best_candidate_skill.lower() != m.required_skill.lower():
+                extra = (
+                    f"<div style='font-size:10px;color:#64748b;margin-top:2px;'>"
+                    f"→ '{m.best_candidate_skill}' (cos {m.similarity:.2f})</div>"
+                )
+            st.markdown(_skill_pill(m.required_skill, "#16a34a", extra), unsafe_allow_html=True)
+        if report.n_matched == 0:
+            st.caption("(none)")
+
+    with col_adjacent:
+        st.markdown("**🟡 Adjacent (transferable)**")
+        st.caption("0.55 – 0.85 SBERT cosine")
+        for m in report.matches:
+            if m.category != "adjacent":
+                continue
+            extra = (
+                f"<div style='font-size:10px;color:#64748b;margin-top:2px;'>"
+                f"→ '{m.best_candidate_skill}' (cos {m.similarity:.2f})</div>"
+            )
+            st.markdown(_skill_pill(m.required_skill, "#ca8a04", extra), unsafe_allow_html=True)
+        if report.n_adjacent == 0:
+            st.caption("(none)")
+
+    with col_missing:
+        st.markdown("**🔴 Missing**")
+        st.caption("< 0.55 SBERT cosine")
+        for m in report.matches:
+            if m.category != "missing":
+                continue
+            extra = ""
+            if m.best_candidate_skill:
+                extra = (
+                    f"<div style='font-size:10px;color:#64748b;margin-top:2px;'>"
+                    f"closest: '{m.best_candidate_skill}' (cos {m.similarity:.2f})</div>"
+                )
+            st.markdown(_skill_pill(m.required_skill, "#dc2626", extra), unsafe_allow_html=True)
+        if report.n_missing == 0:
+            st.caption("(none)")
+
+    st.caption(
+        "Skill embeddings use the same SBERT model as retrieval "
+        "(`all-MiniLM-L6-v2`). Adjacency threshold tuned to catch 'Vue ~ "
+        "React' and 'PyTorch ~ TensorFlow' style transfers while excluding "
+        "unrelated skills. Code: `src/recruit/retrieval/skill_adjacency.py`"
+    )
+
+
+def _render_intervention_panel(pipe: dict, live_prediction) -> None:
+    """Prescriptive intervention engine display.
+
+    Ranks the intervention catalogue by uplift and shows each with:
+      · the intervention name + description
+      · baseline P(drop-off) → counterfactual P(drop-off)
+      · absolute uplift in percentage points
+      · a verdict badge (strongly recommended / consider / minor / may worsen)
+
+    Also runs a greedy minimum-counterfactual search: what's the smallest
+    combination of interventions that pushes P(drop-off) below 30%?
+    """
+    from recruit.dropoff.interventions import (
+        rank_interventions,
+        find_minimum_counterfactual,
+    )
+
+    st.markdown(
+        "For each intervention, the model predicts what **P(drop-off) would be** "
+        "if the intervention were applied. Ranked by biggest reduction first."
+    )
+    st.caption(
+        "Uses the same calibrated model that produced the baseline — so "
+        "counterfactual probabilities are directly comparable. This is the "
+        "**prescriptive** step: moves the system from 'here's why this "
+        "candidate is at risk' to 'here's what would fix it'."
+    )
+
+    results = rank_interventions(pipe["predictor"], live_prediction.feature_row)
+    if not results:
+        st.info("No interventions available.")
+        return
+
+    baseline = results[0].baseline_prob
+    st.markdown(
+        f"<div style='padding:10px 14px;background:#eef2ff;border-radius:8px;"
+        f"border-left:4px solid #1f3a5f;margin-top:6px;font-size:14px;'>"
+        f"<b>Baseline (no intervention):</b> "
+        f"<span style='color:#1f3a5f;font-weight:700;'>"
+        f"{baseline * 100:.0f}% P(drop-off)</span>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(" ")
+
+    verdict_style = {
+        "strongly_recommended": ("#16a34a", "Strongly recommended"),
+        "consider": ("#ca8a04", "Consider"),
+        "minor_effect": ("#64748b", "Minor effect"),
+        "may_worsen": ("#dc2626", "May worsen — avoid"),
+    }
+
+    for r in results:
+        colour, label = verdict_style[r.verdict]
+        pp = r.uplift_absolute * 100
+        arrow = "▼" if r.uplift_absolute > 0 else "▲"
+
+        st.markdown(
+            f"<div style='padding:12px 14px;background:#f8fafc;border-radius:8px;"
+            f"border-left:4px solid {colour};margin-top:8px;'>"
+            f"<div style='display:flex;justify-content:space-between;align-items:center;'>"
+            f"<div style='font-weight:600;font-size:14px;color:#1e293b;'>"
+            f"{r.intervention.name}</div>"
+            f"<div style='color:{colour};font-weight:700;font-size:14px;'>"
+            f"{arrow} {abs(pp):.1f} pp</div>"
+            f"</div>"
+            f"<div style='font-size:12px;color:#475569;margin-top:6px;line-height:1.5;'>"
+            f"{r.intervention.description}</div>"
+            f"<div style='font-size:11px;color:#64748b;margin-top:8px;"
+            f"letter-spacing:0.3px;'>"
+            f"P(drop-off): <b>{baseline * 100:.0f}%</b> → "
+            f"<b>{r.counterfactual_prob * 100:.0f}%</b>  ·  "
+            f"<span style='color:{colour};font-weight:600;'>{label}</span>"
+            f"</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    # ── Minimum-counterfactual search ─────────────────────────────────
+    st.markdown("---")
+    st.markdown("**Minimum-counterfactual analysis**")
+    st.caption(
+        "The fewest interventions needed to push P(drop-off) below 30% "
+        "(the 'low risk' threshold). Selected greedily — at each step, "
+        "apply whichever remaining intervention gives the biggest additional "
+        "reduction."
+    )
+
+    if baseline <= 0.30:
+        st.success(
+            f"✓ Candidate is already at low risk ({baseline * 100:.0f}%). "
+            "No intervention needed."
+        )
+    else:
+        min_cf = find_minimum_counterfactual(
+            pipe["predictor"], live_prediction.feature_row, target_prob=0.30
+        )
+        if not min_cf.interventions:
+            st.warning(
+                "No intervention in the catalogue lowers this candidate's "
+                "risk. The underlying candidate/job features dominate — "
+                "retention through UX changes alone is unlikely."
+            )
+        elif min_cf.reached_target:
+            st.success(
+                f"✓ Reaches target ({min_cf.target_prob * 100:.0f}%) with "
+                f"**{len(min_cf.interventions)} intervention"
+                f"{'s' if len(min_cf.interventions) != 1 else ''}** — "
+                f"final P = {min_cf.final_prob * 100:.0f}%."
+            )
+            for i, iv in enumerate(min_cf.interventions, 1):
+                st.markdown(f"  {i}. {iv.name}")
+        else:
+            st.warning(
+                f"With **all {len(min_cf.interventions)} best interventions "
+                f"applied**, P drops from {min_cf.baseline_prob * 100:.0f}% "
+                f"to only {min_cf.final_prob * 100:.0f}% — target of "
+                f"{min_cf.target_prob * 100:.0f}% not reached. The candidate "
+                f"needs retention support beyond form-level interventions "
+                f"(e.g. personal outreach, salary bump)."
+            )
+            for i, iv in enumerate(min_cf.interventions, 1):
+                st.markdown(f"  {i}. {iv.name}")
+
+    st.caption(
+        "Interventions modelled: prefill work history, shorten form, save-"
+        "and-resume, mobile-optimize, per-field auto-save, reveal salary "
+        "upfront. Feature-deltas are physically grounded (see "
+        "`src/recruit/dropoff/interventions.py`), not tuned to produce a "
+        "target uplift."
+    )
+
+
 def render_watch_step(pipe: dict) -> None:
     watching_idx = st.session_state.get("watching_resume_idx")
     if watching_idx is None:
@@ -1339,6 +1986,17 @@ def render_watch_step(pipe: dict) -> None:
     with st.expander("📄 Candidate résumé", expanded=False):
         _render_candidate_resume(resume, watched_row)
 
+    # ── Find similar candidates (query-by-example) ──────────────────
+    # End-sem extension: recruiter can pivot from "find candidates for
+    # this JD" to "find candidates like THIS person" — useful for
+    # cloning a past successful hire's profile. Uses SBERT + the
+    # trajectory extractor.
+    with st.expander(
+        "🔍 Find similar candidates  ·  query-by-example",
+        expanded=False,
+    ):
+        _render_similar_candidates_panel(pipe, watched_row)
+
     # ── Live SHAP waterfall — updates every interaction ──
     with st.expander("📊 Live SHAP waterfall — why the model predicts what it does",
                      expanded=True):
@@ -1375,6 +2033,39 @@ def render_watch_step(pipe: dict) -> None:
             )
         except Exception as e:  # noqa: BLE001
             st.warning(f"SHAP waterfall unavailable: {e}")
+
+    # ── Prescriptive intervention engine — end-sem extension ──────────
+    # SHAP tells you WHY the model made its prediction. This panel goes
+    # further: what would CHANGE it? For each intervention in the
+    # catalogue (prefill, save-and-resume, shorten form, ...) the engine
+    # re-runs the calibrated model on the counterfactual feature row and
+    # ranks by uplift — the biggest reduction in P(drop-off) first.
+    with st.expander(
+        "💡 Interventions  ·  what would change this candidate's outcome",
+        expanded=False,
+    ):
+        _render_intervention_panel(pipe, live_prediction)
+
+    # ── Skill-gap adjacency map — end-sem extension ───────────────────
+    # Decomposes the skill match into matched / adjacent / missing rather
+    # than the binary keyword-match view. Uses SBERT to detect
+    # transferable skills ("Vue" ~ "React", "PyTorch" ~ "TensorFlow").
+    with st.expander(
+        "🎯 Skill-gap adjacency  ·  matched / adjacent / missing",
+        expanded=False,
+    ):
+        _render_skill_adjacency_panel(pipe, watched_row)
+
+    # ── Distribution-drift monitor — end-sem extension ────────────────
+    # Confronts the synthetic-data limitation: is the current live
+    # session in the distribution of behaviours the model was trained on?
+    # If not, the prediction is extrapolating and should be interpreted
+    # with caution.
+    with st.expander(
+        "📡 Distribution-drift monitor  ·  is this session in-distribution?",
+        expanded=False,
+    ):
+        _render_drift_panel(live_prediction)
 
     # ── RAG explainer panel — grounded natural-language rationale ──
     # "R" in RAG = retrieved evidence (SHAP drivers + candidate summary).
